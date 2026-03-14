@@ -225,7 +225,7 @@ function refreshResumen() {
   });
 
   // Totals row
-  rows.push([]);
+  rows.push(['', '', '', '']);
   rows.push(['TOTAL', totalKeto, totalNoKeto, totalKeto + totalNoKeto]);
 
   // Write
