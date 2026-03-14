@@ -15,6 +15,7 @@ function onOpen() {
 
 /**
  * Main orchestrator. Processes receipt images and classifies items as keto/not-keto.
+ * Flushes rows every FLUSH_INTERVAL files to preserve partial progress on timeout.
  */
 function processReceipts() {
   const ui = SpreadsheetApp.getUi();
@@ -22,8 +23,7 @@ function processReceipts() {
 
   // --- 1. Sheet setup ---
   const sheets = initAllSheets();
-  const ketoKeys = Object.keys(sheets.ketoDict);
-  const geminiUrl = getGeminiUrl(); // cache URL (and API key) for the entire batch
+  const geminiUrl = getGeminiUrl();
 
   // --- 2. Dedup ---
   const processedIds = getProcessedFileIds(sheets.gastos);
@@ -64,7 +64,7 @@ function processReceipts() {
 
   ss.toast('Iniciando procesamiento de ' + batch.length + ' archivo(s)...', 'Recibos', 5);
 
-  // --- 6. Processing loop (accumulate rows for batch write) ---
+  // --- 6. Processing loop with incremental flush ---
   let successCount = 0;
   let errorCount = 0;
   const gastosRows = [];
@@ -82,7 +82,7 @@ function processReceipts() {
 
       if (data) {
         gastosRows.push(buildReceiptRow(data, file.name, file.id));
-        const classified = classifyItems(data, sheets.ketoDict, ketoKeys);
+        const classified = classifyItems(data, sheets.ketoDict, sheets.ketoKeys);
         classified.ketoRows.forEach(function (r) { allKetoRows.push(r); });
         classified.noKetoRows.forEach(function (r) { allNoKetoRows.push(r); });
         successCount++;
@@ -95,14 +95,19 @@ function processReceipts() {
       errorCount++;
     }
 
+    // Flush every FLUSH_INTERVAL files to preserve partial progress
+    if (gastosRows.length >= FLUSH_INTERVAL) {
+      flushAll(sheets, gastosRows, allKetoRows, allNoKetoRows);
+      Logger.log('processReceipts: flush parcial tras %s archivos.', i + 1);
+    }
+
     if (i < batch.length - 1) {
       Utilities.sleep(RATE_LIMIT_DELAY);
     }
   }
 
-  // --- 7. Batch write all accumulated rows ---
-  flushReceiptRows(sheets.gastos, gastosRows);
-  flushClassifiedRows(sheets.incluidos, sheets.excluidos, allKetoRows, allNoKetoRows);
+  // --- 7. Final flush of remaining rows ---
+  flushAll(sheets, gastosRows, allKetoRows, allNoKetoRows);
 
   // --- 8. Refresh summary ---
   refreshResumen();
@@ -160,7 +165,6 @@ function processSpecificFile(fileId) {
   }
 
   const sheets = initAllSheets();
-  const ketoKeys = Object.keys(sheets.ketoDict);
 
   let file;
   try {
@@ -181,7 +185,7 @@ function processSpecificFile(fileId) {
 
   if (data) {
     flushReceiptRows(sheets.gastos, [buildReceiptRow(data, file.getName(), fileId)]);
-    const classified = classifyItems(data, sheets.ketoDict, ketoKeys);
+    const classified = classifyItems(data, sheets.ketoDict, sheets.ketoKeys);
     flushClassifiedRows(sheets.incluidos, sheets.excluidos, classified.ketoRows, classified.noKetoRows);
     refreshResumen();
     Logger.log('processSpecificFile: fila añadida para "%s".', file.getName());

@@ -70,6 +70,7 @@ const RESUMEN_HEADERS = [
   'Categoria',
   'Gasto Keto',
   'Gasto No Keto',
+  'Sin Detalle',
   'Total'
 ];
 
@@ -113,7 +114,8 @@ const DEFAULT_KETO_DICT = [
 // ---------------------------------------------------------------------------
 
 const RATE_LIMIT_DELAY = 4500;
-const BATCH_SIZE = 70;
+const BATCH_SIZE = 35;
+const FLUSH_INTERVAL = 10;
 
 // ---------------------------------------------------------------------------
 // Helpers

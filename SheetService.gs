@@ -27,7 +27,7 @@ function _ensureHeaders(sheet, headers) {
 
 /**
  * Initializes all sheets and returns them with the keto dictionary loaded.
- * Used by both processReceipts and processSpecificFile.
+ * Keys are sorted longest-first for correct substring matching priority.
  */
 function initAllSheets() {
   const gastos = _getOrCreate(SHEET_NAME);
@@ -43,11 +43,16 @@ function initAllSheets() {
   _ensureHeaders(ketoSheet, KETO_DICT_HEADERS);
   ensureKetoDictData(ketoSheet);
 
+  const ketoDict = loadKetoDictionary(ketoSheet);
+  // Sort keys longest-first so "chocolate" matches before "te", "sandwich" before "pollo"
+  const ketoKeys = Object.keys(ketoDict).sort(function (a, b) { return b.length - a.length; });
+
   return {
     gastos: gastos,
     incluidos: incluidos,
     excluidos: excluidos,
-    ketoDict: loadKetoDictionary(ketoSheet)
+    ketoDict: ketoDict,
+    ketoKeys: ketoKeys
   };
 }
 
@@ -125,11 +130,19 @@ function loadKetoDictionary(sheet) {
   return dict;
 }
 
+/**
+ * Checks if an item name matches any keyword using word-boundary matching.
+ * Keywords are expected pre-sorted longest-first so "chocolate" beats "te".
+ */
 function isItemKeto(itemName, ketoDictKeys, ketoDict) {
-  const name = String(itemName).toLowerCase();
+  const name = ' ' + String(itemName).toLowerCase() + ' ';
   for (let i = 0; i < ketoDictKeys.length; i++) {
-    if (name.indexOf(ketoDictKeys[i]) !== -1) {
-      return ketoDict[ketoDictKeys[i]] === 'SI';
+    var key = ketoDictKeys[i];
+    // Word-boundary match: keyword must be surrounded by spaces or string edges
+    var escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    var re = new RegExp('(?:^|\\s)' + escaped + '(?:\\s|$)');
+    if (re.test(name)) {
+      return ketoDict[key] === 'SI';
     }
   }
   return false;
@@ -187,50 +200,79 @@ function flushClassifiedRows(incluidosSheet, excluidosSheet, allKetoRows, allNoK
   }
 }
 
+/**
+ * Flushes all accumulated rows (gastos + classified) and resets the buffers.
+ * Used for incremental flushing to preserve partial progress.
+ */
+function flushAll(sheets, gastosRows, allKetoRows, allNoKetoRows) {
+  flushReceiptRows(sheets.gastos, gastosRows);
+  flushClassifiedRows(sheets.incluidos, sheets.excluidos, allKetoRows, allNoKetoRows);
+  // Clear the arrays (mutate in place so caller sees the reset)
+  gastosRows.length = 0;
+  allKetoRows.length = 0;
+  allNoKetoRows.length = 0;
+}
+
 // ---------------------------------------------------------------------------
-// Resumen sheet
+// Resumen sheet — includes Gastos totals for full reconciliation
 // ---------------------------------------------------------------------------
 
 function refreshResumen() {
+  const gastosSheet = _getOrCreate(SHEET_NAME);
   const incluidosSheet = _getOrCreate(INCLUIDOS_SHEET_NAME);
   const excluidosSheet = _getOrCreate(EXCLUIDOS_SHEET_NAME);
   const resumen = _getOrCreate(RESUMEN_SHEET_NAME);
 
   resumen.clear();
 
+  // Aggregate from classified items
   const catIdx = CLASSIFIED_ITEM_HEADERS.indexOf('Categoria');
   const totalIdx = CLASSIFIED_ITEM_HEADERS.indexOf('Total');
   const ketoTotals = _aggregateByCategory(incluidosSheet, catIdx, totalIdx);
   const noKetoTotals = _aggregateByCategory(excluidosSheet, catIdx, totalIdx);
 
+  // Aggregate from Gastos (the true total per category, includes transfers + item-less receipts)
+  const gastosCatIdx = HEADERS.indexOf('Categoria');
+  const gastosTotalIdx = HEADERS.indexOf('Total');
+  const gastosTotals = _aggregateByCategory(gastosSheet, gastosCatIdx, gastosTotalIdx);
+
+  // Collect all categories from all sources
   const allCats = new Set();
   Object.keys(ketoTotals).forEach(function (c) { allCats.add(c); });
   Object.keys(noKetoTotals).forEach(function (c) { allCats.add(c); });
+  Object.keys(gastosTotals).forEach(function (c) { allCats.add(c); });
 
-  const rows = [RESUMEN_HEADERS];
-  let totalKeto = 0;
-  let totalNoKeto = 0;
+  var rows = [RESUMEN_HEADERS];
+  var totalKeto = 0;
+  var totalNoKeto = 0;
+  var totalSinDetalle = 0;
+  var totalGeneral = 0;
   const sortedCats = Array.from(allCats).sort();
 
   sortedCats.forEach(function (cat) {
     const k = ketoTotals[cat] || 0;
     const nk = noKetoTotals[cat] || 0;
+    const gastosTotal = gastosTotals[cat] || 0;
+    // "Sin Detalle" = Gastos total minus what's accounted for in items
+    const sinDetalle = Math.max(0, gastosTotal - k - nk);
     totalKeto += k;
     totalNoKeto += nk;
-    rows.push([cat, k, nk, k + nk]);
+    totalSinDetalle += sinDetalle;
+    totalGeneral += gastosTotal;
+    rows.push([cat, k, nk, sinDetalle, gastosTotal]);
   });
 
-  rows.push(['', '', '', '']);
-  rows.push(['TOTAL', totalKeto, totalNoKeto, totalKeto + totalNoKeto]);
+  rows.push(['', '', '', '', '']);
+  rows.push(['TOTAL', totalKeto, totalNoKeto, totalSinDetalle, totalGeneral]);
 
   resumen.getRange(1, 1, rows.length, RESUMEN_HEADERS.length).setValues(rows);
 
-  // Format: bold header + totals row, currency columns
+  // Format
   resumen.getRange(1, 1, 1, RESUMEN_HEADERS.length).setFontWeight('bold');
   resumen.setFrozenRows(1);
   resumen.getRange(rows.length, 1, 1, RESUMEN_HEADERS.length).setFontWeight('bold');
   if (rows.length > 1) {
-    resumen.getRange(2, 2, rows.length - 1, 3).setNumberFormat('#,##0');
+    resumen.getRange(2, 2, rows.length - 1, 4).setNumberFormat('#,##0');
   }
 
   Logger.log('SheetService: resumen actualizado con %s categorías.', sortedCats.length);
@@ -243,7 +285,9 @@ function _aggregateByCategory(sheet, catIdx, totalIdx) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return totals;
 
-  const data = sheet.getRange(2, 1, lastRow - 1, CLASSIFIED_ITEM_HEADERS.length).getValues();
+  // Read only the columns we need (widest possible header set)
+  var numCols = Math.max(catIdx, totalIdx) + 1;
+  const data = sheet.getRange(2, 1, lastRow - 1, numCols).getValues();
   data.forEach(function (row) {
     const cat = row[catIdx] || 'Sin Categoria';
     const amount = Number(row[totalIdx]) || 0;
