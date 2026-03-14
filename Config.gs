@@ -61,8 +61,7 @@ const CLASSIFIED_ITEM_HEADERS = [
   'Item',            // D
   'Cantidad',        // E
   'Precio Unitario', // F
-  'Subtotal',        // G
-  'File ID'          // H
+  'Total'            // G
 ];
 
 const KETO_DICT_HEADERS = ['Palabra Clave', 'Keto'];

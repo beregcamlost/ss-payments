@@ -38,7 +38,5 @@ function getImageFiles(folderId) {
  * @returns {string} Base64-encoded file content.
  */
 function getImageBase64(fileId) {
-  const blob = DriveApp.getFileById(fileId).getBlob();
-  const base64 = Utilities.base64Encode(blob.getBytes());
-  return base64;
+  return Utilities.base64Encode(DriveApp.getFileById(fileId).getBlob().getBytes());
 }

@@ -85,7 +85,7 @@ const RESPONSE_SCHEMA = {
  * @param {string} fileName  - Original file name, used only for logging.
  * @returns {object|null} Parsed JSON object with receipt fields, or null on failure.
  */
-function extractReceiptData(base64, mimeType, fileName) {
+function extractReceiptData(base64, mimeType, fileName, cachedUrl) {
   Logger.log('GeminiService: procesando "%s"', fileName);
 
   const payload = {
@@ -130,7 +130,7 @@ Recuerda:
 
   let response;
   try {
-    response = UrlFetchApp.fetch(getGeminiUrl(), options);
+    response = UrlFetchApp.fetch(cachedUrl || getGeminiUrl(), options);
   } catch (networkError) {
     Logger.log('GeminiService: error de red para "%s": %s', fileName, networkError.message);
     return null;
