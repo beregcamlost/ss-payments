@@ -3,30 +3,18 @@
  * Orchestrator: menu setup, main processing loop, and utility entry points.
  */
 
-/**
- * Adds the custom "Recibos" menu to the spreadsheet UI when the file is opened.
- */
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Recibos')
     .addItem('Procesar Recibos', 'processReceipts')
+    .addItem('Actualizar Resumen', 'updateResumen')
     .addSeparator()
     .addItem('Configurar API Key', 'setupApiKey')
     .addToUi();
 }
 
 /**
- * Main orchestrator. Reads new images from Drive, extracts data via Gemini,
- * and writes each result to the Gastos sheet.
- *
- * Flow:
- *  1. Prepare sheet and headers.
- *  2. Build dedup set of already-processed file IDs.
- *  3. Fetch all supported images from the Drive folder.
- *  4. Filter out already-processed files.
- *  5. Respect BATCH_SIZE to avoid the 6-minute execution limit.
- *  6. For each file: download → extract → write row → delay.
- *  7. Show completion summary.
+ * Main orchestrator. Processes receipt images and classifies items as keto/not-keto.
  */
 function processReceipts() {
   const ui = SpreadsheetApp.getUi();
@@ -34,6 +22,18 @@ function processReceipts() {
   // --- 1. Sheet setup ---
   const sheet = getOrCreateSheet();
   ensureHeaders(sheet);
+
+  const incluidosSheet = getOrCreateIncluidosSheet();
+  ensureIncluidosHeaders(incluidosSheet);
+
+  const excluidosSheet = getOrCreateExcluidosSheet();
+  ensureExcluidosHeaders(excluidosSheet);
+
+  const ketoSheet = getOrCreateKetoDict();
+  ensureKetoDictHeaders(ketoSheet);
+  ensureKetoDictData(ketoSheet);
+
+  const ketoDict = loadKetoDictionary(ketoSheet);
 
   // --- 2. Dedup ---
   const processedIds = getProcessedFileIds(sheet);
@@ -102,6 +102,7 @@ function processReceipts() {
 
       if (data) {
         appendReceiptRow(sheet, data, file.name, file.id);
+        appendClassifiedItems(incluidosSheet, excluidosSheet, data, file.id, ketoDict);
         successCount++;
       } else {
         Logger.log('processReceipts: extracción fallida para "%s", se omite.', file.name);
@@ -116,13 +117,15 @@ function processReceipts() {
       errorCount++;
     }
 
-    // Delay between API calls to respect rate limits (skip delay after last file)
     if (i < batch.length - 1) {
       Utilities.sleep(RATE_LIMIT_DELAY);
     }
   }
 
-  // --- 7. Summary ---
+  // --- 7. Refresh summary ---
+  refreshResumen();
+
+  // --- 8. Summary toast ---
   const summaryLines = [
     'Procesamiento completado.',
     '',
@@ -149,9 +152,13 @@ function processReceipts() {
 }
 
 /**
- * Prompts the user to enter their Gemini API key and stores it in
- * Script Properties (not visible in code, not committed to source).
+ * Menu entry point: manually refresh the Resumen tab from existing data.
  */
+function updateResumen() {
+  refreshResumen();
+  SpreadsheetApp.getActiveSpreadsheet().toast('Resumen actualizado.', 'Recibos', 5);
+}
+
 function setupApiKey() {
   const ui = SpreadsheetApp.getUi();
   const result = ui.prompt(
@@ -160,9 +167,7 @@ function setupApiKey() {
     ui.ButtonSet.OK_CANCEL
   );
 
-  if (result.getSelectedButton() !== ui.Button.OK) {
-    return;
-  }
+  if (result.getSelectedButton() !== ui.Button.OK) return;
 
   const key = result.getResponseText().trim();
   if (!key) {
@@ -172,15 +177,8 @@ function setupApiKey() {
 
   PropertiesService.getScriptProperties().setProperty('GEMINI_API_KEY', key);
   ui.alert('Listo', 'API Key guardada correctamente.', ui.ButtonSet.OK);
-  Logger.log('setupApiKey: API key guardada en Script Properties.');
 }
 
-/**
- * Reprocesses a single Drive file by ID. Useful for debugging extraction
- * issues with a specific screenshot without running the full batch.
- *
- * @param {string} fileId - The Drive file ID to reprocess.
- */
 function processSpecificFile(fileId) {
   if (!fileId) {
     Logger.log('processSpecificFile: fileId requerido.');
@@ -189,6 +187,16 @@ function processSpecificFile(fileId) {
 
   const sheet = getOrCreateSheet();
   ensureHeaders(sheet);
+
+  const incluidosSheet = getOrCreateIncluidosSheet();
+  ensureIncluidosHeaders(incluidosSheet);
+  const excluidosSheet = getOrCreateExcluidosSheet();
+  ensureExcluidosHeaders(excluidosSheet);
+
+  const ketoSheet = getOrCreateKetoDict();
+  ensureKetoDictHeaders(ketoSheet);
+  ensureKetoDictData(ketoSheet);
+  const ketoDict = loadKetoDictionary(ketoSheet);
 
   let file;
   try {
@@ -201,7 +209,7 @@ function processSpecificFile(fileId) {
   const mimeType = file.getMimeType();
   if (SUPPORTED_MIME_TYPES.indexOf(mimeType) === -1) {
     Logger.log(
-      'processSpecificFile: tipo MIME no soportado "%s" para el archivo "%s".',
+      'processSpecificFile: tipo MIME no soportado "%s" para "%s".',
       mimeType,
       file.getName()
     );
@@ -213,6 +221,8 @@ function processSpecificFile(fileId) {
 
   if (data) {
     appendReceiptRow(sheet, data, file.getName(), fileId);
+    appendClassifiedItems(incluidosSheet, excluidosSheet, data, fileId, ketoDict);
+    refreshResumen();
     Logger.log('processSpecificFile: fila añadida para "%s".', file.getName());
   } else {
     Logger.log('processSpecificFile: extracción fallida para "%s".', file.getName());

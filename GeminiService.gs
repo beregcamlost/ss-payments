@@ -31,7 +31,10 @@ Reglas generales:
   ${CATEGORIES.join(', ')}.
 - Para "descripcion", resume brevemente los artículos comprados (boleta) o el concepto
   de la transferencia (máximo 100 caracteres).
-- Para "tipo", devuelve exactamente "boleta" o "transferencia".`;
+- Para "tipo", devuelve exactamente "boleta" o "transferencia".
+- Para "items", extrae cada línea de detalle de la boleta como un objeto con nombre,
+  cantidad y precio_unitario. Si es una transferencia o no hay detalle de items, devuelve
+  un arreglo vacío [].`;
 
 /**
  * JSON schema for the structured Gemini response.
@@ -53,11 +56,24 @@ const RESPONSE_SCHEMA = {
     total: { type: 'string', description: 'Monto total en CLP, sin separadores' },
     medio_pago: { type: 'string', description: 'Medio de pago (efectivo, débito, crédito, transferencia, etc.)' },
     banco_destino: { type: 'string', description: 'Banco destino en caso de transferencia' },
-    numero_operacion: { type: 'string', description: 'Número de operación o folio' }
+    numero_operacion: { type: 'string', description: 'Número de operación o folio' },
+    items: {
+      type: 'array',
+      description: 'Detalle de productos/servicios de la boleta. Vacío para transferencias.',
+      items: {
+        type: 'object',
+        properties: {
+          nombre: { type: 'string', description: 'Nombre del producto o servicio' },
+          cantidad: { type: 'number', description: 'Cantidad comprada' },
+          precio_unitario: { type: 'number', description: 'Precio unitario en CLP sin separadores' }
+        },
+        required: ['nombre', 'cantidad', 'precio_unitario']
+      }
+    }
   },
   required: [
     'fecha', 'tipo', 'comercio_destinatario', 'rut', 'categoria', 'descripcion',
-    'neto', 'iva', 'total', 'medio_pago', 'banco_destino', 'numero_operacion'
+    'neto', 'iva', 'total', 'medio_pago', 'banco_destino', 'numero_operacion', 'items'
   ]
 };
 

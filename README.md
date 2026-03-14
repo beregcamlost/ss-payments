@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <em>Screenshots in → Structured expense data out</em>
+  <em>Screenshots in → Structured expense data out → Keto tracking included</em>
 </p>
 
 <p align="center">
@@ -33,37 +33,68 @@
 1. **Share** payment receipts in your WhatsApp group
 2. **Sync** the images to a Google Drive folder (via WhatsApp backup or manual upload)
 3. **Run** the script from the Sheets menu — Gemini reads each image and extracts the data
-4. **Done** — your expenses are categorized, organized, and ready to analyze
+4. **Done** — expenses are categorized, items are extracted, and keto classification is automatic
 
 ## Supported Receipt Types
 
 | Type | Source | Fields Extracted |
 |------|--------|-----------------|
-| 🛒 **Boletas Electrónicas** | Store receipts (retail, food, pharmacy) | Store, RUT, date, items, net/tax/total, payment method |
-| 🏦 **BCI Transfers** | "Operación exitosa" screenshots | Amount, recipient, bank, date, operation number |
-| 🏦 **Scotiabank Transfers** | "Comprobante de Transferencia" | Amount, recipient, RUT, bank, date, operation number |
+| 🛒 **Boletas Electrónicas** | Store receipts (retail, food, pharmacy) | Store, date, items (name/qty/price), total, category |
+| 🏦 **BCI Transfers** | "Operación exitosa" screenshots | Amount, recipient, bank, date |
+| 🏦 **Scotiabank Transfers** | "Comprobante de Transferencia" | Amount, recipient, bank, date |
 
 ## Sheet Structure
 
-The script populates a `Gastos` sheet with 15 columns:
+The script creates and manages 5 tabs:
+
+### Gastos (main expenses)
 
 | Column | Description |
 |--------|-------------|
 | **Fecha** | Transaction date (YYYY-MM-DD) |
 | **Tipo** | `boleta` or `transferencia` |
 | **Comercio / Destinatario** | Store name or transfer recipient |
-| **RUT** | Tax ID of store/recipient |
 | **Categoria** | Auto-categorized (see below) |
 | **Descripcion** | Item summary or transfer concept |
-| **Neto** | Net amount (boletas only) |
-| **IVA** | Tax amount (boletas only) |
 | **Total** | Total in CLP |
-| **Medio de Pago** | Payment method |
 | **Banco Destino** | Recipient bank (transfers) |
-| **N° Operacion** | Transaction/document number |
 | **Archivo** | Original filename |
 | **File ID** | Drive file ID (dedup key) |
 | **Procesado** | Processing timestamp |
+
+### Incluidos (keto items)
+
+Line items from boletas that match keto keywords in the dictionary.
+
+| Column | Description |
+|--------|-------------|
+| **Fecha** | Receipt date |
+| **Comercio** | Store name |
+| **Categoria** | Expense category |
+| **Item** | Product/service name |
+| **Cantidad** | Quantity |
+| **Precio Unitario** | Unit price (CLP) |
+| **Subtotal** | Qty × unit price |
+| **File ID** | Link back to receipt |
+
+### Excluidos (non-keto items)
+
+Same structure as Incluidos — items that don't match keto keywords or match as "NO".
+
+### Diccionario Keto
+
+User-editable keyword reference with ~90 pre-populated entries.
+
+| Column | Description |
+|--------|-------------|
+| **Palabra Clave** | Keyword to match against item names (case-insensitive, substring match) |
+| **Keto** | `SI` or `NO` |
+
+Add, edit, or remove rows anytime. Changes take effect on the next processing run.
+
+### Resumen (summary)
+
+Auto-generated summary aggregating spending by category, split into keto vs non-keto totals. Refreshed automatically after processing or manually via **Recibos → Actualizar Resumen**.
 
 ### Auto-Categories
 
@@ -87,27 +118,27 @@ The script populates a `Gastos` sheet with 15 columns:
 
 | File | Purpose |
 |------|---------|
-| `Config.gs` | Constants, API key helpers |
+| `Config.gs` | Constants, sheet names, keto dictionary defaults, API key helpers |
 | `DriveService.gs` | Drive folder scanning, image loading |
-| `GeminiService.gs` | Gemini API integration, receipt parsing |
-| `SheetService.gs` | Sheet operations, dedup, row writing |
+| `GeminiService.gs` | Gemini API integration, receipt + item extraction |
+| `SheetService.gs` | Sheet operations, keto classification, summary generation |
 | `Code.gs` | Menu, orchestrator, main processing loop |
 
-4. Update `FOLDER_ID` in `Config.gs` with your Google Drive folder ID (the folder containing the receipt images)
+4. Update `FOLDER_ID` in `Config.gs` with your Google Drive folder ID
 
 ### 3. Configure & Run
 
 1. **Save** all files in the Apps Script editor (Ctrl+S)
-2. **Refresh** the Google Sheet — a **"Recibos"** menu will appear in the menu bar
+2. **Refresh** the Google Sheet — a **"Recibos"** menu will appear
 3. Click **Recibos → Configurar API Key** → paste your Gemini key
-4. Click **Recibos → Procesar Recibos** → grant Drive & Sheets permissions when prompted
-5. Watch the progress toasts (bottom-right corner) as each receipt is processed
+4. Click **Recibos → Procesar Recibos** → grant permissions when prompted
+5. Watch the progress toasts as each receipt is processed
 
 > **Deduplication is built-in** — running the script multiple times will only process new images.
 
 ### 4. (Optional) Auto-Processing
 
-Set up a time-based trigger in Apps Script to run `processReceipts` automatically:
+Set up a time-based trigger in Apps Script:
 
 1. In the Apps Script editor, go to **Triggers** (clock icon)
 2. Add trigger → `processReceipts` → Time-driven → choose interval (e.g., every hour)
@@ -116,45 +147,47 @@ Set up a time-based trigger in Apps Script to run `processReceipts` automaticall
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `429` with `limit: 0` | Free tier not activated | Complete billing/tax info in [GCP Console](https://console.cloud.google.com/billing). No charges apply — it just unlocks the free quota |
-| `404` "model no longer available" | Deprecated model ID | Update `GEMINI_MODEL` in `Config.gs` to the latest model (currently `gemini-2.5-flash`) |
-| `403` Permission denied | OAuth scopes not granted | Re-run from menu, click "Allow" on all permission prompts |
-| No "Recibos" menu | `onOpen()` not triggered | Save all files in Apps Script editor, then refresh the Google Sheet |
-| Toast appears but no rows | API errors (check logs) | Go to Apps Script → **Executions** (left sidebar) → expand the latest run to see detailed error logs |
+| `429` with `limit: 0` | Free tier not activated | Complete billing/tax info in [GCP Console](https://console.cloud.google.com/billing) |
+| `404` "model no longer available" | Deprecated model ID | Update `GEMINI_MODEL` in `Config.gs` |
+| `403` Permission denied | OAuth scopes not granted | Re-run from menu, click "Allow" on all prompts |
+| No "Recibos" menu | `onOpen()` not triggered | Save all files, refresh the sheet |
+| No items in Incluidos/Excluidos | Transfers have no line items | Normal — only boletas produce item rows |
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│                   Code.gs                        │
-│            (orchestrator + menu)                  │
-│                                                   │
-│  onOpen() ─── processReceipts() ─── setupApiKey()│
-└──────┬──────────────┬───────────────────┬────────┘
-       │              │                   │
-       ▼              ▼                   ▼
- ┌───────────┐ ┌──────────────┐   ┌─────────────┐
- │DriveService│ │GeminiService │   │SheetService  │
- │            │ │              │   │              │
- │getImageFiles│ │extractReceipt│  │ensureHeaders │
- │getImageB64 │ │   Data()     │   │getProcessed  │
- └──────┬──────┘ └──────┬───────┘  │  FileIds()  │
-        │               │          │appendReceipt │
-        ▼               ▼          │   Row()      │
-   Google Drive    Gemini API      └──────┬───────┘
-                                          ▼
-                                    Google Sheet
-                                     "Gastos"
+┌─────────────────────────────────────────────────────┐
+│                     Code.gs                          │
+│              (orchestrator + menu)                    │
+│                                                       │
+│  onOpen() ── processReceipts() ── updateResumen()    │
+└────┬──────────────┬──────────────────┬───────────────┘
+     │              │                  │
+     ▼              ▼                  ▼
+┌──────────┐ ┌─────────────┐   ┌──────────────┐
+│DriveService│ │GeminiService│   │SheetService   │
+│           │ │             │   │               │
+│getImage   │ │extractReceipt│  │Gastos         │
+│ Files()   │ │  Data()     │   │Incluidos      │
+│getImage   │ │  + items[]  │   │Excluidos      │
+│ Base64()  │ └──────┬──────┘   │Diccionario    │
+└─────┬─────┘        │          │Resumen        │
+      ▼              ▼          └───────┬───────┘
+ Google Drive   Gemini API              ▼
+                                  Google Sheet
+                                   (5 tabs)
 ```
 
 ## Key Features
 
-- **Zero infrastructure** — runs entirely in Google Apps Script, no servers needed
-- **Smart extraction** — Gemini understands receipt context, not just OCR text
+- **Zero infrastructure** — runs entirely in Google Apps Script
+- **Smart extraction** — Gemini understands receipt context, extracts individual line items
+- **Keto tracking** — auto-classifies items via editable keyword dictionary
+- **Included/Excluded split** — separate tabs for keto vs non-keto items
+- **Summary dashboard** — aggregated spending by category with keto breakdown
 - **Structured output** — JSON schema enforcement ensures consistent data
-- **Deduplication** — tracks processed files by Drive ID, never duplicates
+- **Deduplication** — tracks processed files by Drive ID
 - **Rate limiting** — 4.5s delay between API calls, batch size of 70
-- **Progress feedback** — toast notifications show real-time processing status
 - **Error isolation** — one bad image won't stop the entire batch
 - **Secure** — API key stored in Script Properties, never in code
 
