@@ -21,6 +21,7 @@ const SUPPORTED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const SHEET_NAME = 'Gastos';
 const INCLUIDOS_SHEET_NAME = 'Incluidos';
 const EXCLUIDOS_SHEET_NAME = 'Excluidos';
+const NO_FOOD_SHEET_NAME = 'No Comestible';
 const RESUMEN_SHEET_NAME = 'Resumen';
 const KETO_DICT_SHEET_NAME = 'Diccionario Keto';
 
@@ -48,10 +49,9 @@ const HEADERS = [
   'Categoria',           // D
   'Descripcion',         // E
   'Total',               // F
-  'Banco Destino',       // G
-  'Archivo',             // H
-  'File ID',             // I
-  'Procesado'            // J
+  'Archivo',             // G
+  'File ID',             // H
+  'Procesado'            // I
 ];
 
 const CLASSIFIED_ITEM_HEADERS = [
@@ -66,13 +66,6 @@ const CLASSIFIED_ITEM_HEADERS = [
 
 const KETO_DICT_HEADERS = ['Palabra Clave', 'Keto'];
 
-const RESUMEN_HEADERS = [
-  'Categoria',
-  'Gasto Keto',
-  'Gasto No Keto',
-  'Sin Detalle',
-  'Total'
-];
 
 // ---------------------------------------------------------------------------
 // Default keto dictionary (pre-populated on first run)

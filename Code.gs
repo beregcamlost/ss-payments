@@ -7,8 +7,10 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Recibos')
     .addItem('Procesar Recibos', 'processReceipts')
+    .addItem('Reprocesar Todo', 'reprocesarTodo')
     .addItem('Actualizar Resumen', 'updateResumen')
     .addSeparator()
+    .addItem('Limpiar Datos', 'confirmClearAllData')
     .addItem('Configurar API Key', 'setupApiKey')
     .addToUi();
 }
@@ -70,6 +72,7 @@ function processReceipts() {
   const gastosRows = [];
   const allKetoRows = [];
   const allNoKetoRows = [];
+  const allNoFoodRows = [];
 
   for (let i = 0; i < batch.length; i++) {
     const file = batch[i];
@@ -85,6 +88,7 @@ function processReceipts() {
         const classified = classifyItems(data, sheets.ketoDict, sheets.ketoKeys);
         classified.ketoRows.forEach(function (r) { allKetoRows.push(r); });
         classified.noKetoRows.forEach(function (r) { allNoKetoRows.push(r); });
+        classified.noFoodRows.forEach(function (r) { allNoFoodRows.push(r); });
         successCount++;
       } else {
         Logger.log('processReceipts: extracción fallida para "%s", se omite.', file.name);
@@ -97,7 +101,7 @@ function processReceipts() {
 
     // Flush every FLUSH_INTERVAL files to preserve partial progress
     if (gastosRows.length >= FLUSH_INTERVAL) {
-      flushAll(sheets, gastosRows, allKetoRows, allNoKetoRows);
+      flushAll(sheets, gastosRows, allKetoRows, allNoKetoRows, allNoFoodRows);
       Logger.log('processReceipts: flush parcial tras %s archivos.', i + 1);
     }
 
@@ -107,7 +111,7 @@ function processReceipts() {
   }
 
   // --- 7. Final flush of remaining rows ---
-  flushAll(sheets, gastosRows, allKetoRows, allNoKetoRows);
+  flushAll(sheets, gastosRows, allKetoRows, allNoKetoRows, allNoFoodRows);
 
   // --- 8. Refresh summary ---
   refreshResumen();
@@ -136,6 +140,30 @@ function processReceipts() {
 function updateResumen() {
   refreshResumen();
   SpreadsheetApp.getActiveSpreadsheet().toast('Resumen actualizado.', 'Recibos', 5);
+}
+
+function confirmClearAllData() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.alert(
+    'Limpiar Datos',
+    '¿Borrar todos los datos de Gastos, Incluidos, Excluidos, No Comestible y Resumen?\n\nLos encabezados se mantienen.',
+    ui.ButtonSet.YES_NO
+  );
+  if (response !== ui.Button.YES) return;
+  clearAllData();
+  ui.alert('Listo', 'Datos eliminados. Usa "Procesar Recibos" para reprocesar.', ui.ButtonSet.OK);
+}
+
+function reprocesarTodo() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.alert(
+    'Reprocesar Todo',
+    '¿Limpiar todos los datos y reprocesar todos los recibos desde cero?',
+    ui.ButtonSet.YES_NO
+  );
+  if (response !== ui.Button.YES) return;
+  clearAllData();
+  processReceipts();
 }
 
 function setupApiKey() {
@@ -186,7 +214,7 @@ function processSpecificFile(fileId) {
   if (data) {
     flushReceiptRows(sheets.gastos, [buildReceiptRow(data, file.getName(), fileId)]);
     const classified = classifyItems(data, sheets.ketoDict, sheets.ketoKeys);
-    flushClassifiedRows(sheets.incluidos, sheets.excluidos, classified.ketoRows, classified.noKetoRows);
+    flushClassifiedRows(sheets.incluidos, sheets.excluidos, sheets.noFood, classified.ketoRows, classified.noKetoRows, classified.noFoodRows);
     refreshResumen();
     Logger.log('processSpecificFile: fila añadida para "%s".', file.getName());
   } else {

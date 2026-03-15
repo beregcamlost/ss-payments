@@ -45,7 +45,7 @@
 
 ## Sheet Structure
 
-The script creates and manages 5 tabs:
+The script creates and manages 6 tabs:
 
 ### Gastos (main expenses)
 
@@ -56,15 +56,14 @@ The script creates and manages 5 tabs:
 | **Comercio / Destinatario** | Store name or transfer recipient |
 | **Categoria** | Auto-categorized (see below) |
 | **Descripcion** | Item summary or transfer concept |
-| **Total** | Total in CLP |
-| **Banco Destino** | Recipient bank (transfers) |
+| **Total** | Total in CLP ($#,##0) |
 | **Archivo** | Original filename |
 | **File ID** | Drive file ID (dedup key) |
 | **Procesado** | Processing timestamp |
 
 ### Incluidos (keto items)
 
-Line items from boletas that match keto keywords in the dictionary.
+Line items from boletas classified as keto-friendly (`SI` in dictionary).
 
 | Column | Description |
 |--------|-------------|
@@ -74,31 +73,54 @@ Line items from boletas that match keto keywords in the dictionary.
 | **Item** | Product/service name |
 | **Cantidad** | Quantity |
 | **Precio Unitario** | Unit price (CLP) |
-| **Subtotal** | Qty × unit price |
-| **File ID** | Link back to receipt |
+| **Total** | Qty × unit price |
 
-### Excluidos (non-keto items)
+### Excluidos (non-keto food items)
 
-Same structure as Incluidos — items that don't match keto keywords or match as "NO".
+Same structure as Incluidos — food/drink items classified as non-keto (`NO` in dictionary).
+
+### No Comestible (non-food items)
+
+Same structure as Incluidos — items that aren't food or drink (cleaning supplies, bags, hygiene products, etc.). Classified as `NO_FOOD` in the dictionary.
 
 ### Diccionario Keto
 
-User-editable keyword reference with ~90 pre-populated entries.
+User-editable keyword reference with ~90 pre-populated entries. Gemini auto-learns new keywords when it encounters unknown items.
 
 | Column | Description |
 |--------|-------------|
-| **Palabra Clave** | Keyword to match against item names (case-insensitive, substring match) |
-| **Keto** | `SI` or `NO` |
+| **Palabra Clave** | Keyword to match against item names (case-insensitive, longest-match-first) |
+| **Keto** | `SI` (keto food), `NO` (non-keto food), or `NO_FOOD` (non-food item) |
 
-Add, edit, or remove rows anytime. Changes take effect on the next processing run.
+Add, edit, or remove rows anytime. Changes take effect on the next processing run. Longer keywords take priority (e.g., "chocolate bitter" → SI matches before "chocolate" → NO).
 
 ### Resumen (summary)
 
-Auto-generated summary aggregating spending by category, split into keto vs non-keto totals. Refreshed automatically after processing or manually via **Recibos → Actualizar Resumen**.
+Auto-generated summary with four sections:
+
+| Section | Description |
+|---------|-------------|
+| **KETO (Incluidos)** | Spending on keto-friendly food by category |
+| **NO KETO (Excluidos)** | Spending on non-keto food by category |
+| **NO COMESTIBLE** | Spending on non-food items by category |
+| **SIN DETALLE** | Spending from receipts without itemized detail |
+| **TOTAL GENERAL** | Grand total across all sections |
+
+All monetary values are formatted as CLP ($#,##0). Refreshed automatically after processing or manually via **Recibos → Actualizar Resumen**.
 
 ### Auto-Categories
 
 `Alimentacion` · `Farmacia` · `Vestuario` · `Hogar` · `Transferencia Personal` · `Arriendo` · `Servicios` · `Transporte` · `Otro`
+
+## Menu Options
+
+| Menu Item | Description |
+|-----------|-------------|
+| **Procesar Recibos** | Process new (unprocessed) receipt images |
+| **Reprocesar Todo** | Clear all data and reprocess everything from scratch |
+| **Actualizar Resumen** | Refresh only the Resumen tab |
+| **Limpiar Datos** | Clear all data from all tabs (keeps headers) |
+| **Configurar API Key** | Set your Gemini API key |
 
 ## Setup
 
@@ -121,7 +143,7 @@ Auto-generated summary aggregating spending by category, split into keto vs non-
 | `Config.gs` | Constants, sheet names, keto dictionary defaults, API key helpers |
 | `DriveService.gs` | Drive folder scanning, image loading |
 | `GeminiService.gs` | Gemini API integration, receipt + item extraction |
-| `SheetService.gs` | Sheet operations, keto classification, summary generation |
+| `SheetService.gs` | Sheet operations, keto classification, Gemini fallback, summary generation |
 | `Code.gs` | Menu, orchestrator, main processing loop |
 
 4. Update `FOLDER_ID` in `Config.gs` with your Google Drive folder ID
@@ -143,6 +165,14 @@ Set up a time-based trigger in Apps Script:
 1. In the Apps Script editor, go to **Triggers** (clock icon)
 2. Add trigger → `processReceipts` → Time-driven → choose interval (e.g., every hour)
 
+## Smart Classification
+
+Items from boletas are classified in three tiers:
+
+1. **Dictionary match** (instant) — checks item name against Diccionario Keto keywords, longest match first
+2. **Gemini fallback** (API call) — unknown items are sent to Gemini for classification as keto food, non-keto food, or non-food
+3. **Auto-learn** — Gemini's answers are saved back to the dictionary, so the same items won't need an API call again
+
 ## Troubleshooting
 
 | Error | Cause | Fix |
@@ -152,6 +182,7 @@ Set up a time-based trigger in Apps Script:
 | `403` Permission denied | OAuth scopes not granted | Re-run from menu, click "Allow" on all prompts |
 | No "Recibos" menu | `onOpen()` not triggered | Save all files, refresh the sheet |
 | No items in Incluidos/Excluidos | Transfers have no line items | Normal — only boletas produce item rows |
+| Items in wrong tab | Missing/wrong dictionary keyword | Edit Diccionario Keto, then Reprocesar Todo |
 
 ## Architecture
 
@@ -160,7 +191,7 @@ Set up a time-based trigger in Apps Script:
 │                     Code.gs                          │
 │              (orchestrator + menu)                    │
 │                                                       │
-│  onOpen() ── processReceipts() ── updateResumen()    │
+│  onOpen() ── processReceipts() ── reprocesarTodo()   │
 └────┬──────────────┬──────────────────┬───────────────┘
      │              │                  │
      ▼              ▼                  ▼
@@ -170,24 +201,29 @@ Set up a time-based trigger in Apps Script:
 │getImage   │ │extractReceipt│  │Gastos         │
 │ Files()   │ │  Data()     │   │Incluidos      │
 │getImage   │ │  + items[]  │   │Excluidos      │
-│ Base64()  │ └──────┬──────┘   │Diccionario    │
-└─────┬─────┘        │          │Resumen        │
-      ▼              ▼          └───────┬───────┘
- Google Drive   Gemini API              ▼
-                                  Google Sheet
-                                   (5 tabs)
+│ Base64()  │ └──────┬──────┘   │No Comestible  │
+└─────┬─────┘        │          │Diccionario    │
+      ▼              ▼          │Resumen        │
+ Google Drive   Gemini API      └───────┬───────┘
+                  ▲                     │
+                  │  classify unknown   ▼
+                  └──── items ───  Google Sheet
+                                   (6 tabs)
 ```
 
 ## Key Features
 
 - **Zero infrastructure** — runs entirely in Google Apps Script
 - **Smart extraction** — Gemini understands receipt context, extracts individual line items
-- **Keto tracking** — auto-classifies items via editable keyword dictionary
-- **Included/Excluded split** — separate tabs for keto vs non-keto items
-- **Summary dashboard** — aggregated spending by category with keto breakdown
+- **AI-powered classification** — dictionary for known items, Gemini fallback for unknowns
+- **Auto-learning dictionary** — Gemini results are saved for future runs
+- **Three-way item split** — keto food / non-keto food / non-food in separate tabs
+- **Summary dashboard** — four-section Resumen with subtotals and grand total
+- **CLP formatting** — all monetary values displayed as Chilean pesos ($#,##0)
+- **One-click reprocess** — Reprocesar Todo clears and rebuilds everything
 - **Structured output** — JSON schema enforcement ensures consistent data
 - **Deduplication** — tracks processed files by Drive ID
-- **Rate limiting** — 4.5s delay between API calls, batch size of 70
+- **Rate limiting** — 4.5s delay between API calls, batch size of 35
 - **Error isolation** — one bad image won't stop the entire batch
 - **Secure** — API key stored in Script Properties, never in code
 
