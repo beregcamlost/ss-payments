@@ -11,13 +11,16 @@ function onOpen() {
     .addItem('Actualizar Resumen', 'updateResumen')
     .addSeparator()
     .addItem('Limpiar Datos', 'confirmClearAllData')
+    .addItem('Invalidar Cache', 'confirmClearCache')
     .addItem('Configurar API Key', 'setupApiKey')
     .addToUi();
 }
 
 /**
- * Main orchestrator. Processes receipt images and classifies items as keto/not-keto.
- * Flushes rows every FLUSH_INTERVAL files to preserve partial progress on timeout.
+ * Main orchestrator. Three-phase processing:
+ * 1. CSVs/Excel → bank transaction rows
+ * 2. Images/PDFs → receipt rows with keto classification
+ * 3. Reconciliation → match receipts to bank transactions
  */
 function processReceipts() {
   const ui = SpreadsheetApp.getUi();
@@ -29,44 +32,39 @@ function processReceipts() {
 
   // --- 2. Dedup ---
   const processedIds = getProcessedFileIds(sheets.gastos);
+  const processedBankHashes = getProcessedBankHashes(sheets.gastos);
 
-  // --- 3. Fetch image list ---
+  // --- 3. Fetch all files ---
   let allFiles;
   try {
-    allFiles = getImageFiles(FOLDER_ID);
+    allFiles = getFiles(FOLDER_ID);
   } catch (driveError) {
     Logger.log('processReceipts: error accediendo a Drive: %s', driveError.message);
     ui.alert('Error', 'No se pudo leer la carpeta de Drive:\n' + driveError.message, ui.ButtonSet.OK);
     return;
   }
 
-  // --- 4. Filter already processed ---
-  const pendingFiles = allFiles.filter(function (f) {
-    return !processedIds.has(f.id);
+  // --- 4. Separate by strategy and filter processed ---
+  var csvFiles = [];
+  var receiptFiles = [];
+
+  allFiles.forEach(function (file) {
+    if (processedIds.has(file.id)) return;
+    if (file.strategy === 'csv' || file.strategy === 'excel') {
+      csvFiles.push(file);
+    } else {
+      receiptFiles.push(file);
+    }
   });
 
-  if (pendingFiles.length === 0) {
-    ui.alert(
-      'Sin archivos nuevos',
-      'Todos los archivos de la carpeta ya han sido procesados.',
-      ui.ButtonSet.OK
-    );
+  var totalPending = csvFiles.length + receiptFiles.length;
+  if (totalPending === 0) {
+    ss.toast('No hay archivos nuevos por procesar.', 'Recibos', 5);
     return;
   }
 
-  // --- 5. Respect batch size ---
-  const hasMore = pendingFiles.length > BATCH_SIZE;
-  const batch = pendingFiles.slice(0, BATCH_SIZE);
+  ss.toast('Procesando ' + totalPending + ' archivo(s)...', 'Recibos', 5);
 
-  Logger.log(
-    'processReceipts: %s archivos pendientes, procesando %s en este lote.',
-    pendingFiles.length,
-    batch.length
-  );
-
-  ss.toast('Iniciando procesamiento de ' + batch.length + ' archivo(s)...', 'Recibos', 5);
-
-  // --- 6. Processing loop with incremental flush ---
   let successCount = 0;
   let errorCount = 0;
   const gastosRows = [];
@@ -74,24 +72,57 @@ function processReceipts() {
   const allNoKetoRows = [];
   const allNoFoodRows = [];
 
-  for (let i = 0; i < batch.length; i++) {
-    const file = batch[i];
-    ss.toast('Procesando ' + (i + 1) + ' de ' + batch.length + ': ' + file.name, 'Recibos', 30);
-    Logger.log('processReceipts: [%s/%s] procesando "%s"', i + 1, batch.length, file.name);
+  // --- PHASE 1: Process CSVs/Excel ---
+  csvFiles.forEach(function (file) {
+    ss.toast('Procesando extracto: ' + file.name, 'Recibos', 30);
+    Logger.log('processReceipts: procesando extracto "%s"', file.name);
 
     try {
-      const base64 = getImageBase64(file.id);
-      const data = extractReceiptData(base64, file.mimeType, file.name, geminiUrl);
+      var fileHash = getDriveFileHash(file.id);
+      var transactions = parseBankFile(file.id, file.strategy, fileHash);
+
+      transactions.forEach(function (tx) {
+        var txHash = getBankTxHash(tx);
+        if (processedBankHashes.has(txHash)) return;
+        processedBankHashes.add(txHash);
+        gastosRows.push(buildBankRow(tx, file.name, file.id));
+      });
+
+      successCount++;
+    } catch (e) {
+      Logger.log('processReceipts: error en extracto "%s": %s', file.name, e.message);
+      errorCount++;
+    }
+
+    Utilities.sleep(RATE_LIMIT_DELAY);
+  });
+
+  // Flush bank rows before processing receipts
+  flushReceiptRows(sheets.gastos, gastosRows);
+  gastosRows.length = 0;
+
+  // --- PHASE 2: Process receipt images/PDFs ---
+  var receiptBatch = receiptFiles.slice(0, BATCH_SIZE);
+
+  for (var i = 0; i < receiptBatch.length; i++) {
+    var file = receiptBatch[i];
+    ss.toast('Procesando ' + (i + 1) + ' de ' + receiptBatch.length + ': ' + file.name, 'Recibos', 30);
+    Logger.log('processReceipts: [%s/%s] procesando "%s"', i + 1, receiptBatch.length, file.name);
+
+    try {
+      var base64 = getFileBase64(file.id);
+      var fileHash = getDriveFileHash(file.id);
+      var data = extractReceiptData(base64, file.mimeType, file.name, fileHash, geminiUrl);
 
       if (data) {
         gastosRows.push(buildReceiptRow(data, file.name, file.id));
-        const classified = classifyItems(data, sheets);
+        var classified = classifyItems(data, sheets);
         classified.ketoRows.forEach(function (r) { allKetoRows.push(r); });
         classified.noKetoRows.forEach(function (r) { allNoKetoRows.push(r); });
         classified.noFoodRows.forEach(function (r) { allNoFoodRows.push(r); });
         successCount++;
       } else {
-        Logger.log('processReceipts: extracción fallida para "%s", se omite.', file.name);
+        Logger.log('processReceipts: extraccion fallida para "%s", se omite.', file.name);
         errorCount++;
       }
     } catch (fileError) {
@@ -99,42 +130,38 @@ function processReceipts() {
       errorCount++;
     }
 
-    // Flush every FLUSH_INTERVAL files to preserve partial progress
     if (gastosRows.length >= FLUSH_INTERVAL) {
       flushAll(sheets, gastosRows, allKetoRows, allNoKetoRows, allNoFoodRows);
       Logger.log('processReceipts: flush parcial tras %s archivos.', i + 1);
     }
 
-    if (i < batch.length - 1) {
+    if (i < receiptBatch.length - 1) {
       Utilities.sleep(RATE_LIMIT_DELAY);
     }
   }
 
-  // --- 7. Final flush of remaining rows ---
+  // --- Final flush ---
   flushAll(sheets, gastosRows, allKetoRows, allNoKetoRows, allNoFoodRows);
 
-  // --- 8. Refresh summary ---
+  // --- PHASE 3: Reconciliation ---
+  matchAndMerge(sheets.gastos);
+
+  // --- Refresh summary ---
   refreshResumen();
 
-  // --- 9. Summary toast ---
-  const summaryLines = [
+  // --- Summary ---
+  var remaining = receiptFiles.length - receiptBatch.length;
+  var summaryLines = [
     'Procesamiento completado.',
     '',
     'Exitosos:  ' + successCount,
-    'Con error: ' + errorCount,
-    'Total procesados en este lote: ' + batch.length
+    'Errores:   ' + errorCount
   ];
-
-  if (hasMore) {
-    const remaining = pendingFiles.length - batch.length;
+  if (remaining > 0) {
     summaryLines.push('');
-    summaryLines.push(
-      'Quedan ' + remaining + ' archivo(s) pendientes. Ejecuta "Procesar Recibos" nuevamente.'
-    );
+    summaryLines.push('Quedan ' + remaining + ' archivos. Ejecuta de nuevo.');
   }
-
   ss.toast(summaryLines.join('\n'), 'Recibos', 15);
-  Logger.log('processReceipts: finalizado. Exitosos: %s, Errores: %s.', successCount, errorCount);
 }
 
 function updateResumen() {
@@ -152,6 +179,18 @@ function confirmClearAllData() {
   if (response !== ui.Button.YES) return;
   clearAllData();
   ui.alert('Listo', 'Datos eliminados. Usa "Procesar Recibos" para reprocesar.', ui.ButtonSet.OK);
+}
+
+function confirmClearCache() {
+  var ui = SpreadsheetApp.getUi();
+  var response = ui.alert(
+    'Invalidar Cache',
+    '¿Borrar todo el cache de respuestas Gemini?\n\nLa próxima ejecución volverá a llamar a la API para todos los archivos.',
+    ui.ButtonSet.YES_NO
+  );
+  if (response !== ui.Button.YES) return;
+  clearCache();
+  ui.alert('Listo', 'Cache invalidado.', ui.ButtonSet.OK);
 }
 
 function reprocesarTodo() {
@@ -187,14 +226,11 @@ function setupApiKey() {
 }
 
 function processSpecificFile(fileId) {
-  if (!fileId) {
-    Logger.log('processSpecificFile: fileId requerido.');
-    return;
-  }
+  if (!fileId) return;
 
   const sheets = initAllSheets();
 
-  let file;
+  var file;
   try {
     file = DriveApp.getFileById(fileId);
   } catch (e) {
@@ -202,22 +238,31 @@ function processSpecificFile(fileId) {
     return;
   }
 
-  const mimeType = file.getMimeType();
-  if (SUPPORTED_MIME_TYPES.indexOf(mimeType) === -1) {
-    Logger.log('processSpecificFile: tipo MIME no soportado "%s" para "%s".', mimeType, file.getName());
+  var mimeType = file.getMimeType();
+  var strategy = FILE_STRATEGIES[mimeType];
+  if (!strategy) {
+    Logger.log('processSpecificFile: tipo no soportado: %s', mimeType);
     return;
   }
 
-  const base64 = getImageBase64(fileId);
-  const data = extractReceiptData(base64, mimeType, file.getName());
+  var fileHash = getDriveFileHash(fileId);
 
-  if (data) {
-    flushReceiptRows(sheets.gastos, [buildReceiptRow(data, file.getName(), fileId)]);
-    const classified = classifyItems(data, sheets);
-    flushClassifiedRows(sheets.incluidos, sheets.excluidos, sheets.noFood, classified.ketoRows, classified.noKetoRows, classified.noFoodRows);
-    refreshResumen();
-    Logger.log('processSpecificFile: fila añadida para "%s".', file.getName());
+  if (strategy === 'csv' || strategy === 'excel') {
+    var transactions = parseBankFile(fileId, strategy, fileHash);
+    var rows = transactions.map(function (tx) { return buildBankRow(tx, file.getName(), fileId); });
+    flushReceiptRows(sheets.gastos, rows);
   } else {
-    Logger.log('processSpecificFile: extracción fallida para "%s".', file.getName());
+    var base64 = getFileBase64(fileId);
+    var data = extractReceiptData(base64, mimeType, file.getName(), fileHash);
+    if (data) {
+      flushReceiptRows(sheets.gastos, [buildReceiptRow(data, file.getName(), fileId)]);
+      var classified = classifyItems(data, sheets);
+      flushClassifiedRows(sheets.incluidos, sheets.excluidos, sheets.noFood,
+        classified.ketoRows, classified.noKetoRows, classified.noFoodRows);
+    }
   }
+
+  matchAndMerge(sheets.gastos);
+  refreshResumen();
+  Logger.log('processSpecificFile: procesado "%s".', file.getName());
 }

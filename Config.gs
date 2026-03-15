@@ -13,7 +13,23 @@ const GEMINI_MODEL = 'gemini-2.5-flash';
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 /** @const {string[]} MIME types accepted for processing */
-const SUPPORTED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+const SUPPORTED_MIME_TYPES = [
+  'image/jpeg', 'image/png', 'image/webp',
+  'application/pdf',
+  'text/csv',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+];
+
+const FILE_STRATEGIES = {
+  'image/jpeg': 'image',
+  'image/png': 'image',
+  'image/webp': 'image',
+  'application/pdf': 'pdf',
+  'text/csv': 'csv',
+  'application/vnd.ms-excel': 'excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'excel'
+};
 
 // ---------------------------------------------------------------------------
 // Sheet names
@@ -24,6 +40,10 @@ const EXCLUIDOS_SHEET_NAME = 'Excluidos';
 const NO_FOOD_SHEET_NAME = 'No Comestible';
 const RESUMEN_SHEET_NAME = 'Resumen';
 const KETO_DICT_SHEET_NAME = 'Diccionario Keto';
+const CACHE_SHEET_NAME = 'Cache';
+
+const ORIGEN = { RECIBO: 'recibo', TRANSFERENCIA: 'transferencia', EXTRACTO: 'extracto' };
+const ESTADO = { CONCILIADO: 'Conciliado', SIN_COMPROBANTE: 'Sin Comprobante', SIN_EXTRACTO: 'Sin Extracto' };
 
 /** @const {string[]} Expense categories for classification */
 const CATEGORIES = [
@@ -43,15 +63,17 @@ const CATEGORIES = [
 // ---------------------------------------------------------------------------
 
 const HEADERS = [
-  'Fecha',               // A
-  'Tipo',                // B
-  'Comercio / Destinatario', // C
-  'Categoria',           // D
-  'Descripcion',         // E
-  'Total',               // F
-  'Archivo',             // G
-  'File ID',             // H
-  'Procesado'            // I
+  'Fecha',                      // A
+  'Tipo',                       // B
+  'Comercio / Destinatario',    // C
+  'Categoria',                  // D
+  'Descripcion',                // E
+  'Total',                      // F
+  'Archivo',                    // G
+  'File ID',                    // H
+  'Procesado',                  // I
+  'Origen',                     // J
+  'Estado'                      // K
 ];
 
 const CLASSIFIED_ITEM_HEADERS = [

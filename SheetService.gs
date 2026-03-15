@@ -46,6 +46,8 @@ function initAllSheets() {
   _ensureHeaders(ketoSheet, KETO_DICT_HEADERS);
   ensureKetoDictData(ketoSheet);
 
+  initCacheSheet();
+
   const ketoDict = loadKetoDictionary(ketoSheet);
   const ketoPatterns = _buildKetoPatterns(ketoDict);
 
@@ -102,6 +104,7 @@ function parseAmount(value) {
 }
 
 function buildReceiptRow(data, fileName, fileId) {
+  var origen = (data.tipo === 'transferencia') ? ORIGEN.TRANSFERENCIA : ORIGEN.RECIBO;
   return [
     data.fecha || '',
     data.tipo || '',
@@ -111,8 +114,55 @@ function buildReceiptRow(data, fileName, fileId) {
     parseAmount(data.total),
     fileName,
     fileId,
-    new Date()
+    new Date(),
+    origen,
+    ESTADO.SIN_EXTRACTO
   ];
+}
+
+/**
+ * Builds a row array for a bank transaction (from CSV/Excel).
+ */
+function buildBankRow(tx, fileName, fileId) {
+  return [
+    tx.fecha || '',
+    'extracto',
+    tx.comercio || tx.descripcion || '',
+    tx.categoria || 'Otro',
+    tx.descripcion || '',
+    tx.monto || 0,
+    fileName,
+    fileId,
+    new Date(),
+    ORIGEN.EXTRACTO,
+    ESTADO.SIN_COMPROBANTE
+  ];
+}
+
+/**
+ * Returns a Set of bank transaction hashes already in Gastos.
+ * Used for CSV deduplication.
+ */
+function getProcessedBankHashes(sheet) {
+  var hashes = new Set();
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return hashes;
+
+  var origenCol = HEADERS.indexOf('Origen');
+  var fechaCol = HEADERS.indexOf('Fecha');
+  var descCol = HEADERS.indexOf('Descripcion');
+  var totalCol = HEADERS.indexOf('Total');
+
+  var data = sheet.getRange(2, 1, lastRow - 1, HEADERS.length).getValues();
+  data.forEach(function (row) {
+    if (row[origenCol] === ORIGEN.EXTRACTO) {
+      var tx = { fecha: row[fechaCol], descripcion: row[descCol], monto: row[totalCol] };
+      hashes.add(getBankTxHash(tx));
+    }
+  });
+
+  Logger.log('SheetService: %s transacciones bancarias ya procesadas.', hashes.size);
+  return hashes;
 }
 
 /**

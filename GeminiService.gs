@@ -142,7 +142,7 @@ function callGemini(payload, label, url) {
 /**
  * Sends a receipt image to the Gemini API and returns the extracted structured data.
  */
-function extractReceiptData(base64, mimeType, fileName, cachedUrl) {
+function extractReceiptData(base64, mimeType, fileName, fileHash, cachedUrl) {
   Logger.log('GeminiService: procesando "%s"', fileName);
 
   const payload = {
@@ -178,7 +178,137 @@ Recuerda:
     }
   };
 
-  const result = callGemini(payload, fileName, cachedUrl);
+  const result = cachedCallGemini(fileHash || fileName, 'receipt', payload, fileName);
   if (result) Logger.log('GeminiService: extracción exitosa para "%s".', fileName);
   return result;
+}
+
+/**
+ * Sends the first rows of a CSV/Excel to Gemini to auto-detect column mapping.
+ *
+ * @param {string[][]} sampleRows - First 5 rows of the file.
+ * @param {string} hash - Cache key for the file.
+ * @returns {object|null} Column mapping: { fecha_col, descripcion_col, monto_col, banco, date_format, header_row }
+ */
+function detectCsvColumns(sampleRows, hash) {
+  var sample = sampleRows.slice(0, 5).map(function (row) { return row.join(' | '); }).join('\n');
+
+  var payload = {
+    system_instruction: {
+      parts: [{ text: 'Eres un experto en extractos bancarios chilenos. Identificas columnas y formatos de archivos CSV/Excel de bancos.' }]
+    },
+    contents: [{
+      role: 'user',
+      parts: [{ text: 'Identifica las columnas de este extracto bancario chileno. Las primeras filas son:\n\n' + sample +
+        '\n\nIdentifica que columna (indice base 0) contiene: fecha, descripcion/glosa, monto/cargo, y el nombre del banco si se puede inferir del contenido.' }]
+    }],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'object',
+        properties: {
+          fecha_col: { type: 'number', description: 'Indice de la columna de fecha (base 0)' },
+          descripcion_col: { type: 'number', description: 'Indice de la columna de descripcion/glosa' },
+          monto_col: { type: 'number', description: 'Indice de la columna de monto/cargo' },
+          banco: { type: 'string', description: 'Nombre del banco inferido del contenido' },
+          date_format: { type: 'string', description: 'Formato de fecha detectado (ej: DD/MM/YYYY, YYYY-MM-DD)' },
+          header_row: { type: 'number', description: 'Indice de la fila de encabezados (base 0), -1 si no hay' },
+          moneda: { type: 'string', description: 'Moneda (CLP, USD, etc.)' }
+        },
+        required: ['fecha_col', 'descripcion_col', 'monto_col', 'banco', 'date_format', 'header_row']
+      },
+      temperature: 0.1
+    }
+  };
+
+  return cachedCallGemini(hash, 'csv_columns', payload, 'deteccion columnas CSV');
+}
+
+/**
+ * Batch-categorizes bank transaction descriptions.
+ *
+ * @param {string[]} descriptions - Array of transaction descriptions.
+ * @param {string} hash - Cache key for the batch.
+ * @returns {object|null} { items: [{ descripcion, categoria, comercio }] }
+ */
+function categorizeBankDescriptions(descriptions, hash) {
+  var unique = Array.from(new Set(descriptions));
+
+  var payload = {
+    system_instruction: {
+      parts: [{ text: 'Eres un experto en finanzas personales chilenas. Categorizas transacciones bancarias.' }]
+    },
+    contents: [{
+      role: 'user',
+      parts: [{ text: 'Categoriza cada transaccion bancaria. Categorias validas: ' + CATEGORIES.join(', ') +
+        '\n\nTransacciones:\n' + unique.map(function (d, i) { return (i + 1) + '. ' + d; }).join('\n') }]
+    }],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'object',
+        properties: {
+          items: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                descripcion: { type: 'string', description: 'Descripcion original' },
+                categoria: { type: 'string', description: 'Categoria asignada' },
+                comercio: { type: 'string', description: 'Nombre normalizado del comercio' }
+              },
+              required: ['descripcion', 'categoria', 'comercio']
+            }
+          }
+        },
+        required: ['items']
+      },
+      temperature: 0.1
+    }
+  };
+
+  return cachedCallGemini(hash, 'csv_categories', payload, 'categorizacion banco');
+}
+
+/**
+ * Asks Gemini to match a receipt to candidate bank transactions.
+ *
+ * @param {object} receiptData - Extracted receipt data (comercio, fecha, total).
+ * @param {object[]} candidates - Candidate bank rows [{fecha, descripcion, monto}].
+ * @param {string} hash - Cache key.
+ * @returns {object|null} { matched: true/false, index: candidateIndex }
+ */
+function matchReceiptToTransaction(receiptData, candidates, hash) {
+  var payload = {
+    system_instruction: {
+      parts: [{ text: 'Eres un experto en conciliacion bancaria chilena. Determinas si un comprobante de compra corresponde a una transaccion bancaria.' }]
+    },
+    contents: [{
+      role: 'user',
+      parts: [{ text: 'Este comprobante es de:\n' +
+        '- Comercio: ' + receiptData.comercio + '\n' +
+        '- Fecha: ' + receiptData.fecha + '\n' +
+        '- Total: $' + receiptData.total + '\n\n' +
+        'Corresponde a alguna de estas transacciones bancarias?\n' +
+        candidates.map(function (c, i) {
+          return (i + 1) + '. Fecha: ' + c.fecha + ' | Descripcion: ' + c.descripcion + ' | Monto: $' + c.monto;
+        }).join('\n') +
+        '\n\nSi no hay coincidencia, responde matched=false.' }]
+    }],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'object',
+        properties: {
+          matched: { type: 'boolean', description: 'true si el comprobante corresponde a alguna transaccion' },
+          index: { type: 'number', description: 'Indice (base 0) de la transaccion que coincide, -1 si no hay' },
+          confidence: { type: 'string', description: 'alta, media, o baja' }
+        },
+        required: ['matched', 'index']
+      },
+      temperature: 0.1
+    }
+  };
+
+  return cachedCallGemini(hash, 'matching', payload, 'matching recibo-banco');
 }
