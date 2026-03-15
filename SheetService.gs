@@ -47,8 +47,7 @@ function initAllSheets() {
   ensureKetoDictData(ketoSheet);
 
   const ketoDict = loadKetoDictionary(ketoSheet);
-  // Sort keys longest-first so "chocolate" matches before "te", "sandwich" before "pollo"
-  const ketoKeys = Object.keys(ketoDict).sort(function (a, b) { return b.length - a.length; });
+  const ketoPatterns = _buildKetoPatterns(ketoDict);
 
   return {
     gastos: gastos,
@@ -56,7 +55,7 @@ function initAllSheets() {
     excluidos: excluidos,
     noFood: noFood,
     ketoDict: ketoDict,
-    ketoKeys: ketoKeys
+    ketoPatterns: ketoPatterns
   };
 }
 
@@ -155,21 +154,27 @@ function loadKetoDictionary(sheet) {
 }
 
 /**
- * Checks if an item name matches any keyword using word-boundary matching.
- * Keywords are expected pre-sorted longest-first so "chocolate" beats "te".
+ * Pre-compiles regex patterns for all keto dictionary keys.
+ * Sorted longest-first so "chocolate bitter" matches before "chocolate".
  */
+function _buildKetoPatterns(ketoDict) {
+  return Object.keys(ketoDict)
+    .sort(function (a, b) { return b.length - a.length; })
+    .map(function (key) {
+      var escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return { key: key, regex: new RegExp('(?:^|\\s)' + escaped + '(?:\\s|$)'), value: ketoDict[key] };
+    });
+}
+
 /**
- * Checks if an item name matches any keyword in the keto dictionary.
- * Returns 'SI' if keto, 'NO' if non-keto, 'NO_FOOD' if not food, or null if no match.
+ * Classifies an item using pre-compiled keto patterns.
+ * Returns 'SI', 'NO', 'NO_FOOD', or null if no match.
  */
-function classifyItemKeto(itemName, ketoDictKeys, ketoDict) {
+function classifyItemKeto(itemName, ketoPatterns) {
   const name = ' ' + String(itemName).toLowerCase() + ' ';
-  for (let i = 0; i < ketoDictKeys.length; i++) {
-    var key = ketoDictKeys[i];
-    var escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    var re = new RegExp('(?:^|\\s)' + escaped + '(?:\\s|$)');
-    if (re.test(name)) {
-      return ketoDict[key];
+  for (var i = 0; i < ketoPatterns.length; i++) {
+    if (ketoPatterns[i].regex.test(name)) {
+      return ketoPatterns[i].value;
     }
   }
   return null;
@@ -229,35 +234,8 @@ ${unique.map(function (name, i) { return (i + 1) + '. ' + name; }).join('\n')}`;
     }
   };
 
-  const options = {
-    method: 'post',
-    contentType: 'application/json',
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  };
-
-  var response;
-  try {
-    response = UrlFetchApp.fetch(getGeminiUrl(), options);
-  } catch (e) {
-    Logger.log('SheetService: error de red en clasificación Gemini: %s', e.message);
-    return {};
-  }
-
-  if (response.getResponseCode() !== 200) {
-    Logger.log('SheetService: Gemini clasificación HTTP %s: %s', response.getResponseCode(), response.getContentText());
-    return {};
-  }
-
-  var parsed;
-  try {
-    var envelope = JSON.parse(response.getContentText());
-    var text = envelope.candidates[0].content.parts[0].text;
-    parsed = JSON.parse(text);
-  } catch (e) {
-    Logger.log('SheetService: error parseando respuesta Gemini clasificación: %s', e.message);
-    return {};
-  }
+  var parsed = callGemini(payload, 'clasificación keto');
+  if (!parsed) return {};
 
   var results = {};
   var newDictEntries = [];
@@ -293,7 +271,7 @@ ${unique.map(function (name, i) { return (i + 1) + '. ' + name; }).join('\n')}`;
  * Classifies items from a receipt as keto/not-keto.
  * Returns { ketoRows: [], noKetoRows: [] } for batch flushing.
  */
-function classifyItems(data, ketoDict, ketoDictKeys) {
+function classifyItems(data, sheets) {
   const items = data.items;
   const ketoRows = [];
   const noKetoRows = [];
@@ -304,15 +282,15 @@ function classifyItems(data, ketoDict, ketoDictKeys) {
   const comercio = data.comercio_destinatario || '';
   const categoria = data.categoria || '';
 
-  // First pass: classify using dictionary, collect unknowns
-  var pending = []; // items with no dictionary match
-  var classified = []; // { row, classification }
+  // First pass: classify using pre-compiled patterns, collect unknowns
+  var pending = [];
+  var classified = [];
 
   items.forEach(function (item) {
     const qty = item.cantidad || 0;
     const unitPrice = item.precio_unitario || 0;
     const row = [fecha, comercio, categoria, item.nombre || '', qty, unitPrice, qty * unitPrice];
-    const cls = classifyItemKeto(item.nombre, ketoDictKeys, ketoDict);
+    const cls = classifyItemKeto(item.nombre, sheets.ketoPatterns);
 
     if (cls) {
       classified.push({ row: row, classification: cls });
@@ -330,6 +308,11 @@ function classifyItems(data, ketoDict, ketoDictKeys) {
       var cls = geminiResults[p.name] || 'NO_FOOD';
       classified.push({ row: p.row, classification: cls });
     });
+
+    // Update in-memory dict + patterns so subsequent receipts benefit
+    var ketoSheet = _getOrCreate(KETO_DICT_SHEET_NAME);
+    sheets.ketoDict = loadKetoDictionary(ketoSheet);
+    sheets.ketoPatterns = _buildKetoPatterns(sheets.ketoDict);
   }
 
   // Sort into buckets
@@ -349,15 +332,17 @@ function classifyItems(data, ketoDict, ketoDictKeys) {
 /**
  * Batch-writes accumulated classified rows to the Incluidos/Excluidos sheets.
  */
+// Precomputed column indices for classified item sheets
+const CLASSIFIED_COLS = CLASSIFIED_ITEM_HEADERS.length;
+const CLASSIFIED_PRECIO_COL = CLASSIFIED_ITEM_HEADERS.indexOf('Precio Unitario') + 1;
+const CLASSIFIED_TOTAL_COL = CLASSIFIED_ITEM_HEADERS.indexOf('Total') + 1;
+
 function _flushRowsToSheet(sheet, rows, label) {
   if (rows.length === 0) return;
-  const cols = CLASSIFIED_ITEM_HEADERS.length;
-  const precioCol = CLASSIFIED_ITEM_HEADERS.indexOf('Precio Unitario') + 1;
-  const totalCol = CLASSIFIED_ITEM_HEADERS.indexOf('Total') + 1;
   const startRow = sheet.getLastRow() + 1;
-  sheet.getRange(startRow, 1, rows.length, cols).setValues(rows);
-  sheet.getRange(startRow, precioCol, rows.length, 1).setNumberFormat('$#,##0');
-  sheet.getRange(startRow, totalCol, rows.length, 1).setNumberFormat('$#,##0');
+  sheet.getRange(startRow, 1, rows.length, CLASSIFIED_COLS).setValues(rows);
+  sheet.getRange(startRow, CLASSIFIED_PRECIO_COL, rows.length, 1).setNumberFormat('$#,##0');
+  sheet.getRange(startRow, CLASSIFIED_TOTAL_COL, rows.length, 1).setNumberFormat('$#,##0');
   Logger.log('SheetService: %s items %s escritos.', rows.length, label);
 }
 
@@ -420,81 +405,36 @@ function refreshResumen() {
   var boldRows = [];
   var grandTotal = 0;
 
-  // --- KETO (Incluidos) section ---
-  rows.push(['KETO (Incluidos)', '']);
-  boldRows.push(rows.length);
-  rows.push(['Categoria', 'Total']);
-  boldRows.push(rows.length);
-  var subtotalKeto = 0;
-  Object.keys(ketoTotals).sort().forEach(function (cat) {
-    rows.push([cat, ketoTotals[cat]]);
-    subtotalKeto += ketoTotals[cat];
-  });
-  rows.push(['SUBTOTAL KETO', subtotalKeto]);
-  boldRows.push(rows.length);
-  grandTotal += subtotalKeto;
+  function addSection(title, subtotalLabel, totalsMap) {
+    rows.push([title, '']);
+    boldRows.push(rows.length);
+    rows.push(['Categoria', 'Total']);
+    boldRows.push(rows.length);
+    var subtotal = 0;
+    Object.keys(totalsMap).sort().forEach(function (cat) {
+      rows.push([cat, totalsMap[cat]]);
+      subtotal += totalsMap[cat];
+    });
+    rows.push([subtotalLabel, subtotal]);
+    boldRows.push(rows.length);
+    grandTotal += subtotal;
+    rows.push(['', '']);
+  }
 
-  rows.push(['', '']); // separator
+  addSection('KETO (Incluidos)', 'SUBTOTAL KETO', ketoTotals);
+  addSection('NO KETO (Excluidos)', 'SUBTOTAL NO KETO', noKetoTotals);
+  addSection('NO COMESTIBLE', 'SUBTOTAL NO COMESTIBLE', noFoodTotals);
+  addSection('SIN DETALLE', 'SUBTOTAL SIN DETALLE', sinDetalleTotals);
 
-  // --- NO KETO (Excluidos) section ---
-  rows.push(['NO KETO (Excluidos)', '']);
-  boldRows.push(rows.length);
-  rows.push(['Categoria', 'Total']);
-  boldRows.push(rows.length);
-  var subtotalNoKeto = 0;
-  Object.keys(noKetoTotals).sort().forEach(function (cat) {
-    rows.push([cat, noKetoTotals[cat]]);
-    subtotalNoKeto += noKetoTotals[cat];
-  });
-  rows.push(['SUBTOTAL NO KETO', subtotalNoKeto]);
-  boldRows.push(rows.length);
-  grandTotal += subtotalNoKeto;
-
-  rows.push(['', '']); // separator
-
-  // --- NO COMESTIBLE section ---
-  rows.push(['NO COMESTIBLE', '']);
-  boldRows.push(rows.length);
-  rows.push(['Categoria', 'Total']);
-  boldRows.push(rows.length);
-  var subtotalNoFood = 0;
-  Object.keys(noFoodTotals).sort().forEach(function (cat) {
-    rows.push([cat, noFoodTotals[cat]]);
-    subtotalNoFood += noFoodTotals[cat];
-  });
-  rows.push(['SUBTOTAL NO COMESTIBLE', subtotalNoFood]);
-  boldRows.push(rows.length);
-  grandTotal += subtotalNoFood;
-
-  rows.push(['', '']); // separator
-
-  // --- SIN DETALLE section ---
-  rows.push(['SIN DETALLE', '']);
-  boldRows.push(rows.length);
-  rows.push(['Categoria', 'Total']);
-  boldRows.push(rows.length);
-  var subtotalSinDetalle = 0;
-  Object.keys(sinDetalleTotals).sort().forEach(function (cat) {
-    rows.push([cat, sinDetalleTotals[cat]]);
-    subtotalSinDetalle += sinDetalleTotals[cat];
-  });
-  rows.push(['SUBTOTAL SIN DETALLE', subtotalSinDetalle]);
-  boldRows.push(rows.length);
-  grandTotal += subtotalSinDetalle;
-
-  rows.push(['', '']); // separator
-
-  // --- TOTAL GENERAL ---
   rows.push(['TOTAL GENERAL', grandTotal]);
   boldRows.push(rows.length);
 
   // Write all rows
   resumen.getRange(1, 1, rows.length, 2).setValues(rows);
 
-  // Bold formatting for section headers, column headers, subtotals, and grand total
-  boldRows.forEach(function (r) {
-    resumen.getRange(r, 1, 1, 2).setFontWeight('bold');
-  });
+  // Bold formatting batched into a single service call
+  resumen.getRangeList(boldRows.map(function (r) { return 'A' + r + ':B' + r; }))
+    .setFontWeight('bold');
 
   // CLP format on all Total column values (column B)
   resumen.getRange(1, 2, rows.length, 1).setNumberFormat('$#,##0');

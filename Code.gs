@@ -85,7 +85,7 @@ function processReceipts() {
 
       if (data) {
         gastosRows.push(buildReceiptRow(data, file.name, file.id));
-        const classified = classifyItems(data, sheets.ketoDict, sheets.ketoKeys);
+        const classified = classifyItems(data, sheets);
         classified.ketoRows.forEach(function (r) { allKetoRows.push(r); });
         classified.noKetoRows.forEach(function (r) { allNoKetoRows.push(r); });
         classified.noFoodRows.forEach(function (r) { allNoFoodRows.push(r); });
@@ -213,7 +213,7 @@ function processSpecificFile(fileId) {
 
   if (data) {
     flushReceiptRows(sheets.gastos, [buildReceiptRow(data, file.getName(), fileId)]);
-    const classified = classifyItems(data, sheets.ketoDict, sheets.ketoKeys);
+    const classified = classifyItems(data, sheets);
     flushClassifiedRows(sheets.incluidos, sheets.excluidos, sheets.noFood, classified.ketoRows, classified.noKetoRows, classified.noFoodRows);
     refreshResumen();
     Logger.log('processSpecificFile: fila añadida para "%s".', file.getName());

@@ -78,12 +78,69 @@ const RESPONSE_SCHEMA = {
 };
 
 /**
- * Sends a receipt image to the Gemini API and returns the extracted structured data.
+ * Sends a payload to the Gemini API and returns the parsed JSON response.
+ * Handles fetch, HTTP errors, and Gemini response envelope unwrapping.
  *
- * @param {string} base64    - Base64-encoded image content.
- * @param {string} mimeType  - MIME type of the image (e.g. 'image/jpeg').
- * @param {string} fileName  - Original file name, used only for logging.
- * @returns {object|null} Parsed JSON object with receipt fields, or null on failure.
+ * @param {object} payload  - Full Gemini API request body.
+ * @param {string} label    - Label for logging (e.g. file name or operation).
+ * @param {string} [url]    - Optional cached Gemini URL.
+ * @returns {object|null} Parsed JSON from the response, or null on failure.
+ */
+function callGemini(payload, label, url) {
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  var response;
+  try {
+    response = UrlFetchApp.fetch(url || getGeminiUrl(), options);
+  } catch (networkError) {
+    Logger.log('GeminiService: error de red para "%s": %s', label, networkError.message);
+    return null;
+  }
+
+  if (response.getResponseCode() !== 200) {
+    Logger.log('GeminiService: HTTP %s para "%s": %s', response.getResponseCode(), label, response.getContentText());
+    return null;
+  }
+
+  var envelope;
+  try {
+    envelope = JSON.parse(response.getContentText());
+  } catch (e) {
+    Logger.log('GeminiService: no se pudo parsear la respuesta para "%s".', label);
+    return null;
+  }
+
+  var candidates = envelope.candidates;
+  if (!candidates || candidates.length === 0) {
+    Logger.log('GeminiService: sin candidatos en la respuesta para "%s".', label);
+    return null;
+  }
+
+  var textContent = candidates[0].content &&
+    candidates[0].content.parts &&
+    candidates[0].content.parts[0] &&
+    candidates[0].content.parts[0].text;
+
+  if (!textContent) {
+    Logger.log('GeminiService: contenido vacío en la respuesta para "%s".', label);
+    return null;
+  }
+
+  try {
+    return JSON.parse(textContent);
+  } catch (e) {
+    Logger.log('GeminiService: JSON inválido en contenido para "%s": %s', label, textContent);
+    return null;
+  }
+}
+
+/**
+ * Sends a receipt image to the Gemini API and returns the extracted structured data.
  */
 function extractReceiptData(base64, mimeType, fileName, cachedUrl) {
   Logger.log('GeminiService: procesando "%s"', fileName);
@@ -121,71 +178,7 @@ Recuerda:
     }
   };
 
-  const options = {
-    method: 'post',
-    contentType: 'application/json',
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  };
-
-  let response;
-  try {
-    response = UrlFetchApp.fetch(cachedUrl || getGeminiUrl(), options);
-  } catch (networkError) {
-    Logger.log('GeminiService: error de red para "%s": %s', fileName, networkError.message);
-    return null;
-  }
-
-  const statusCode = response.getResponseCode();
-  const responseText = response.getContentText();
-
-  if (statusCode !== 200) {
-    Logger.log(
-      'GeminiService: respuesta HTTP %s para "%s". Body: %s',
-      statusCode,
-      fileName,
-      responseText
-    );
-    return null;
-  }
-
-  let parsed;
-  try {
-    parsed = JSON.parse(responseText);
-  } catch (parseError) {
-    Logger.log('GeminiService: no se pudo parsear la respuesta para "%s".', fileName);
-    return null;
-  }
-
-  // Navigate to the text content inside the Gemini response envelope
-  const candidates = parsed.candidates;
-  if (!candidates || candidates.length === 0) {
-    Logger.log('GeminiService: sin candidatos en la respuesta para "%s".', fileName);
-    return null;
-  }
-
-  const textContent = candidates[0].content &&
-    candidates[0].content.parts &&
-    candidates[0].content.parts[0] &&
-    candidates[0].content.parts[0].text;
-
-  if (!textContent) {
-    Logger.log('GeminiService: contenido vacío en la respuesta para "%s".', fileName);
-    return null;
-  }
-
-  let extracted;
-  try {
-    extracted = JSON.parse(textContent);
-  } catch (jsonError) {
-    Logger.log(
-      'GeminiService: JSON inválido en contenido para "%s": %s',
-      fileName,
-      textContent
-    );
-    return null;
-  }
-
-  Logger.log('GeminiService: extracción exitosa para "%s".', fileName);
-  return extracted;
+  const result = callGemini(payload, fileName, cachedUrl);
+  if (result) Logger.log('GeminiService: extracción exitosa para "%s".', fileName);
+  return result;
 }

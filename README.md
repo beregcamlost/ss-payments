@@ -169,9 +169,9 @@ Set up a time-based trigger in Apps Script:
 
 Items from boletas are classified in three tiers:
 
-1. **Dictionary match** (instant) — checks item name against Diccionario Keto keywords, longest match first
-2. **Gemini fallback** (API call) — unknown items are sent to Gemini for classification as keto food, non-keto food, or non-food
-3. **Auto-learn** — Gemini's answers are saved back to the dictionary, so the same items won't need an API call again
+1. **Dictionary match** (instant) — pre-compiled regex patterns match item names against Diccionario Keto keywords, longest match first
+2. **Gemini fallback** (API call) — unknown items are batched and sent to Gemini via a shared `callGemini()` helper for classification as keto food, non-keto food, or non-food
+3. **Auto-learn** — Gemini's answers are saved back to the dictionary and patterns are rebuilt in-memory, so subsequent receipts in the same batch (and future runs) skip Gemini for those items
 
 ## Troubleshooting
 
@@ -198,9 +198,9 @@ Items from boletas are classified in three tiers:
 ┌──────────┐ ┌─────────────┐   ┌──────────────┐
 │DriveService│ │GeminiService│   │SheetService   │
 │           │ │             │   │               │
-│getImage   │ │extractReceipt│  │Gastos         │
-│ Files()   │ │  Data()     │   │Incluidos      │
-│getImage   │ │  + items[]  │   │Excluidos      │
+│getImage   │ │callGemini() │   │Gastos         │
+│ Files()   │ │extractReceipt│  │Incluidos      │
+│getImage   │ │  Data()     │   │Excluidos      │
 │ Base64()  │ └──────┬──────┘   │No Comestible  │
 └─────┬─────┘        │          │Diccionario    │
       ▼              ▼          │Resumen        │
