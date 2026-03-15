@@ -8,11 +8,11 @@
 <h1 align="center">🧾 SS Payments</h1>
 
 <p align="center">
-  <strong>Automated WhatsApp receipt scanner powered by Gemini AI</strong>
+  <strong>Automated expense tracker powered by Gemini AI</strong>
 </p>
 
 <p align="center">
-  <em>Screenshots in → Structured expense data out → Keto tracking included</em>
+  <em>Receipts, bank statements, PDFs → Structured expense data → Keto tracking included</em>
 </p>
 
 <p align="center">
@@ -28,12 +28,21 @@
 ```
 📱 WhatsApp Group        📁 Google Drive         🤖 Gemini AI          📊 Google Sheet
  (receipt photos)  ──▶  (synced folder)    ──▶  (vision + JSON)  ──▶  (structured data)
+🏦 Bank Statements       (CSV/Excel/PDF)         (auto-detect)         (reconciled)
 ```
 
-1. **Share** payment receipts in your WhatsApp group
-2. **Sync** the images to a Google Drive folder (via WhatsApp backup or manual upload)
-3. **Run** the script from the Sheets menu — Gemini reads each image and extracts the data
-4. **Done** — expenses are categorized, items are extracted, and keto classification is automatic
+1. **Upload** receipt images, bank statement CSVs/Excel, or PDFs to a Google Drive folder
+2. **Run** the script from the Sheets menu — Gemini processes each file automatically
+3. **Done** — bank transactions are matched to receipts, items are keto-classified, and summaries update
+
+## Supported File Types
+
+| Type | Format | Processing |
+|------|--------|-----------|
+| 🖼️ **Images** | JPEG, PNG, WEBP | Gemini vision extracts receipt/transfer data |
+| 📄 **PDFs** | PDF | Sent directly to Gemini (native PDF support) |
+| 📊 **CSV** | CSV | Auto-detect columns via Gemini, parse transactions |
+| 📊 **Excel** | XLSX, XLS | Convert to Google Sheet via Drive API, then parse |
 
 ## Supported Receipt Types
 
@@ -42,17 +51,24 @@
 | 🛒 **Boletas Electrónicas** | Store receipts (retail, food, pharmacy) | Store, date, items (name/qty/price), total, category |
 | 🏦 **BCI Transfers** | "Operación exitosa" screenshots | Amount, recipient, bank, date |
 | 🏦 **Scotiabank Transfers** | "Comprobante de Transferencia" | Amount, recipient, bank, date |
+| 🏦 **Bank Statements** | CSV/Excel from any Chilean bank | Date, description, amount, auto-categorized |
+
+## Three-Phase Processing
+
+1. **Bank statements first** — CSVs and Excel files create transaction rows (Origen=`extracto`)
+2. **Receipts second** — Images and PDFs create receipt rows with keto classification (Origen=`recibo`/`transferencia`)
+3. **Reconciliation** — Matches receipts to bank transactions using fuzzy store matching + Gemini fallback
 
 ## Sheet Structure
 
-The script creates and manages 6 tabs:
+The script creates and manages 7 tabs (6 visible + 1 hidden):
 
 ### Gastos (main expenses)
 
 | Column | Description |
 |--------|-------------|
 | **Fecha** | Transaction date (YYYY-MM-DD) |
-| **Tipo** | `boleta` or `transferencia` |
+| **Tipo** | `boleta`, `transferencia`, or `extracto` |
 | **Comercio / Destinatario** | Store name or transfer recipient |
 | **Categoria** | Auto-categorized (see below) |
 | **Descripcion** | Item summary or transfer concept |
@@ -60,6 +76,8 @@ The script creates and manages 6 tabs:
 | **Archivo** | Original filename |
 | **File ID** | Drive file ID (dedup key) |
 | **Procesado** | Processing timestamp |
+| **Origen** | `recibo`, `transferencia`, or `extracto` |
+| **Estado** | `Conciliado`, `Sin Comprobante`, or `Sin Extracto` |
 
 ### Incluidos (keto items)
 
@@ -108,18 +126,36 @@ Auto-generated summary with four sections:
 
 All monetary values are formatted as CLP ($#,##0). Refreshed automatically after processing or manually via **Recibos → Actualizar Resumen**.
 
+### Cache (hidden)
+
+Hidden sheet that caches all Gemini API responses to avoid redundant calls. Keyed by `fileId + lastModified` so re-uploads are detected automatically.
+
 ### Auto-Categories
 
 `Alimentacion` · `Farmacia` · `Vestuario` · `Hogar` · `Transferencia Personal` · `Arriendo` · `Servicios` · `Transporte` · `Otro`
+
+## Bank Reconciliation
+
+After processing both bank statements and receipts, the system matches them using two tiers:
+
+1. **Deterministic match** — Fuzzy store name (normalized, accents stripped) + exact date + exact amount. No API calls.
+2. **Gemini fallback** — For unmatched receipts, sends receipt data + candidate bank rows (similar amount ±10%) to Gemini to identify the match.
+
+| Receipt | Bank Row | Estado |
+|---------|----------|--------|
+| Matched | Matched | `Conciliado` |
+| None | Exists | `Sin Comprobante` |
+| Exists | None | `Sin Extracto` |
 
 ## Menu Options
 
 | Menu Item | Description |
 |-----------|-------------|
-| **Procesar Recibos** | Process new (unprocessed) receipt images |
+| **Procesar Recibos** | Process all new files (images, PDFs, CSVs, Excel) |
 | **Reprocesar Todo** | Clear all data and reprocess everything from scratch |
 | **Actualizar Resumen** | Refresh only the Resumen tab |
-| **Limpiar Datos** | Clear all data from all tabs (keeps headers) |
+| **Limpiar Datos** | Clear all data from all tabs (keeps headers, preserves cache) |
+| **Invalidar Cache** | Clear all cached Gemini responses |
 | **Configurar API Key** | Set your Gemini API key |
 
 ## Setup
@@ -136,17 +172,21 @@ All monetary values are formatted as CLP ($#,##0). Refreshed automatically after
 
 1. Create a new Google Sheet
 2. Go to **Extensions → Apps Script**
-3. Delete the default `Code.gs` content, then create 5 script files and paste the contents from this repo:
+3. Delete the default `Code.gs` content, then create 8 script files and paste the contents from this repo:
 
 | File | Purpose |
 |------|---------|
 | `Config.gs` | Constants, sheet names, keto dictionary defaults, API key helpers |
-| `DriveService.gs` | Drive folder scanning, image loading |
-| `GeminiService.gs` | Gemini API integration, receipt + item extraction |
+| `DriveService.gs` | Drive folder scanning, file loading, Excel conversion |
+| `GeminiService.gs` | Gemini API integration, receipt extraction, CSV column detection, bank categorization, receipt matching |
 | `SheetService.gs` | Sheet operations, keto classification, Gemini fallback, summary generation |
-| `Code.gs` | Menu, orchestrator, main processing loop |
+| `CacheService.gs` | Gemini response caching (hidden Cache sheet) |
+| `CsvService.gs` | CSV/Excel bank statement parsing with auto column detection |
+| `ReconciliationService.gs` | Two-tier receipt-to-bank-transaction matching |
+| `Code.gs` | Menu, orchestrator, three-phase processing loop |
 
 4. Update `FOLDER_ID` in `Config.gs` with your Google Drive folder ID
+5. **Enable Drive API**: In the Apps Script editor, go to **Services** (+ icon) → Add **Drive API** (v2). Required for Excel file conversion.
 
 ### 3. Configure & Run
 
@@ -154,9 +194,9 @@ All monetary values are formatted as CLP ($#,##0). Refreshed automatically after
 2. **Refresh** the Google Sheet — a **"Recibos"** menu will appear
 3. Click **Recibos → Configurar API Key** → paste your Gemini key
 4. Click **Recibos → Procesar Recibos** → grant permissions when prompted
-5. Watch the progress toasts as each receipt is processed
+5. Watch the progress toasts as each file is processed
 
-> **Deduplication is built-in** — running the script multiple times will only process new images.
+> **Deduplication is built-in** — running the script multiple times will only process new files. Bank transactions are deduped by date+description+amount hash.
 
 ### 4. (Optional) Auto-Processing
 
@@ -173,6 +213,16 @@ Items from boletas are classified in three tiers:
 2. **Gemini fallback** (API call) — unknown items are batched and sent to Gemini via a shared `callGemini()` helper for classification as keto food, non-keto food, or non-food
 3. **Auto-learn** — Gemini's answers are saved back to the dictionary and patterns are rebuilt in-memory, so subsequent receipts in the same batch (and future runs) skip Gemini for those items
 
+## Gemini Response Cache
+
+All Gemini API calls are cached in a hidden **Cache** sheet to minimize token usage:
+
+- **Cache key**: `fileId + lastModified` (avoids loading large files into memory)
+- **Cache types**: `receipt`, `csv_columns`, `csv_categories`, `matching`
+- **Limpiar Datos** does NOT clear cache — cached responses remain valid
+- **Invalidar Cache** clears only the Cache sheet — next run will re-call Gemini
+- **Reprocesar Todo** clears data but preserves cache — fast reprocess from cached results
+
 ## Troubleshooting
 
 | Error | Cause | Fix |
@@ -183,48 +233,47 @@ Items from boletas are classified in three tiers:
 | No "Recibos" menu | `onOpen()` not triggered | Save all files, refresh the sheet |
 | No items in Incluidos/Excluidos | Transfers have no line items | Normal — only boletas produce item rows |
 | Items in wrong tab | Missing/wrong dictionary keyword | Edit Diccionario Keto, then Reprocesar Todo |
+| Excel conversion fails | Drive API not enabled | Add Drive API v2 in Apps Script Services |
+| CSV columns not detected | Unusual format | Gemini couldn't parse — check the CSV structure |
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                     Code.gs                          │
-│              (orchestrator + menu)                    │
-│                                                       │
-│  onOpen() ── processReceipts() ── reprocesarTodo()   │
-└────┬──────────────┬──────────────────┬───────────────┘
-     │              │                  │
-     ▼              ▼                  ▼
-┌──────────┐ ┌─────────────┐   ┌──────────────┐
-│DriveService│ │GeminiService│   │SheetService   │
-│           │ │             │   │               │
-│getImage   │ │callGemini() │   │Gastos         │
-│ Files()   │ │extractReceipt│  │Incluidos      │
-│getImage   │ │  Data()     │   │Excluidos      │
-│ Base64()  │ └──────┬──────┘   │No Comestible  │
-└─────┬─────┘        │          │Diccionario    │
-      ▼              ▼          │Resumen        │
- Google Drive   Gemini API      └───────┬───────┘
-                  ▲                     │
-                  │  classify unknown   ▼
-                  └──── items ───  Google Sheet
-                                   (6 tabs)
+CSV/Excel ──▶ CsvService ──▶ Gemini (detect columns) ──▶ Gastos (Origen=extracto)
+                                                                │
+Images ──────▶ GeminiService ──▶ Gemini (extract receipt) ──────┤
+                                                                │
+PDF ─────────▶ GeminiService ──▶ Gemini (extract PDF) ──────────┤
+                                                                ▼
+                                                  ReconciliationService
+                                                    matchAndMerge()
+                                                    │           │
+                                               Conciliado  Sin Comprobante
+                                                    │
+                                            Incluidos/Excluidos/No Comestible
+                                                    │
+                                                 Resumen
+
+All Gemini calls ──▶ cachedCallGemini() ──▶ Cache hit? return : call API + store
 ```
 
 ## Key Features
 
 - **Zero infrastructure** — runs entirely in Google Apps Script
+- **Multi-format ingestion** — images, PDFs, CSVs, and Excel files from any Chilean bank
 - **Smart extraction** — Gemini understands receipt context, extracts individual line items
+- **Bank reconciliation** — matches receipts to bank transactions (fuzzy + AI)
 - **AI-powered classification** — dictionary for known items, Gemini fallback for unknowns
 - **Auto-learning dictionary** — Gemini results are saved for future runs
+- **Response caching** — all Gemini calls cached to minimize token usage
 - **Three-way item split** — keto food / non-keto food / non-food in separate tabs
 - **Summary dashboard** — four-section Resumen with subtotals and grand total
 - **CLP formatting** — all monetary values displayed as Chilean pesos ($#,##0)
 - **One-click reprocess** — Reprocesar Todo clears and rebuilds everything
 - **Structured output** — JSON schema enforcement ensures consistent data
-- **Deduplication** — tracks processed files by Drive ID
+- **Deduplication** — receipts by Drive ID, bank transactions by content hash
 - **Rate limiting** — 4.5s delay between API calls, batch size of 35
-- **Error isolation** — one bad image won't stop the entire batch
+- **Error isolation** — one bad file won't stop the entire batch
 - **Secure** — API key stored in Script Properties, never in code
 
 ## Security
