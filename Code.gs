@@ -124,7 +124,7 @@ function _processCsvFiles(csvFiles, sheets, processedBankHashes, ss) {
   var errorCount = 0;
   var gastosRows = [];
 
-  csvFiles.forEach(function (file) {
+  csvFiles.forEach(function (file, idx) {
     ss.toast('Procesando extracto: ' + file.name, 'Recibos', 30);
     Logger.log('processReceipts: procesando extracto "%s"', file.name);
 
@@ -145,7 +145,9 @@ function _processCsvFiles(csvFiles, sheets, processedBankHashes, ss) {
       errorCount++;
     }
 
-    Utilities.sleep(RATE_LIMIT_DELAY);
+    if (idx < csvFiles.length - 1) {
+      Utilities.sleep(RATE_LIMIT_DELAY);
+    }
   });
 
   return { successCount: successCount, errorCount: errorCount, gastosRows: gastosRows };

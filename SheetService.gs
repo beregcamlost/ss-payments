@@ -87,7 +87,7 @@ function getProcessedFileIds(sheet) {
   const processed = new Set();
   if (lastRow < 2) return processed;
 
-  const col = HEADERS.indexOf('File ID') + 1;
+  const col = COL.FILE_ID + 1;
   const values = sheet.getRange(2, col, lastRow - 1, 1).getValues();
   values.forEach(function (row) {
     if (row[0]) processed.add(String(row[0]));
@@ -173,8 +173,7 @@ function flushReceiptRows(sheet, rows) {
   const startRow = sheet.getLastRow() + 1;
   sheet.getRange(startRow, 1, rows.length, HEADERS.length)
     .setValues(rows);
-  // CLP format on Total column (F = index 6, but after removing Banco Destino it's column 6)
-  const totalCol = HEADERS.indexOf('Total') + 1;
+  const totalCol = COL.TOTAL + 1;
   sheet.getRange(startRow, totalCol, rows.length, 1).setNumberFormat('$#,##0');
   Logger.log('SheetService: %s filas de gastos escritas.', rows.length);
 }
@@ -437,8 +436,8 @@ function refreshResumen() {
   const noFoodTotals = _aggregateByCategory(noFoodSheet, catIdx, totalIdx);
 
   // Aggregate from Gastos (the true total per category)
-  const gastosCatIdx = HEADERS.indexOf('Categoria');
-  const gastosTotalIdx = HEADERS.indexOf('Total');
+  const gastosCatIdx = COL.CATEGORIA;
+  const gastosTotalIdx = COL.TOTAL;
   const gastosTotals = _aggregateByCategory(gastosSheet, gastosCatIdx, gastosTotalIdx);
 
   // Compute "Sin Detalle" per category (Gastos total minus all classified items)

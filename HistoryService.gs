@@ -13,7 +13,7 @@ function archiveMonth(targetDate) {
   targetDate = targetDate || new Date();
   var year = targetDate.getFullYear();
   var month = targetDate.getMonth(); // 0-based
-  var monthStr = String(month + 1).length < 2 ? '0' + (month + 1) : String(month + 1);
+  var monthStr = _pad(month + 1);
   var prefix = year + '-' + monthStr;
   var tabName = prefix + ' ' + MONTH_NAMES_ES[month];
 
@@ -52,14 +52,14 @@ function archiveMonth(targetDate) {
 
   // Bold formatting
   if (boldRows.length > 0) {
-    sheet.getRangeList(boldRows.map(function(r) { return r; })).setFontWeight('bold');
+    sheet.getRangeList(boldRows).setFontWeight('bold');
   }
 
   // Freeze header row
   sheet.setFrozenRows(1);
 
   Logger.log('HistoryService: tab "%s" creado con %s filas.', tabName, currentRow - 1);
-  SpreadsheetApp.getActiveSpreadsheet().toast('Mes archivado: ' + tabName, 'Recibos', 5);
+  ss.toast('Mes archivado: ' + tabName, 'Recibos', 5);
 }
 
 /**
@@ -140,53 +140,60 @@ function _writeMiniResumen(sheet, startRow, ketoRows, noKetoRows, noFoodRows, bo
   var catIdx = CLASSIFIED_ITEM_HEADERS.indexOf('Categoria');
   var totalIdx = CLASSIFIED_ITEM_HEADERS.indexOf('Total');
 
-  // Section title
-  sheet.getRange(startRow, 1).setValue('Mini-Resumen');
-  boldRows.push('A' + startRow + ':B' + startRow);
-  startRow++;
-
+  // Accumulate all rows in memory, then write in a single batch
+  var allRows = [];
   var grandTotal = 0;
 
+  allRows.push(['Mini-Resumen', '']);
+  boldRows.push('A' + startRow + ':B' + startRow);
+
   function addSubSection(label, rows) {
-    sheet.getRange(startRow, 1).setValue(label);
-    boldRows.push('A' + startRow + ':B' + startRow);
-    startRow++;
+    allRows.push([label, '']);
+    boldRows.push('A' + (startRow + allRows.length - 1) + ':B' + (startRow + allRows.length - 1));
 
-    sheet.getRange(startRow, 1, 1, 2).setValues([['Categoria', 'Total']]);
-    boldRows.push('A' + startRow + ':B' + startRow);
-    startRow++;
+    allRows.push(['Categoria', 'Total']);
+    boldRows.push('A' + (startRow + allRows.length - 1) + ':B' + (startRow + allRows.length - 1));
 
-    var totals = {};
-    rows.forEach(function(row) {
-      var cat = row[catIdx] || 'Sin Categoria';
-      var amount = Number(row[totalIdx]) || 0;
-      totals[cat] = (totals[cat] || 0) + amount;
-    });
+    var totals = _aggregateByCategoryFromRows(rows, catIdx, totalIdx);
 
     var subtotal = 0;
     Object.keys(totals).sort().forEach(function(cat) {
-      sheet.getRange(startRow, 1, 1, 2).setValues([[cat, totals[cat]]]);
-      sheet.getRange(startRow, 2).setNumberFormat('$#,##0');
+      allRows.push([cat, totals[cat]]);
       subtotal += totals[cat];
-      startRow++;
     });
 
-    sheet.getRange(startRow, 1, 1, 2).setValues([['Subtotal', subtotal]]);
-    sheet.getRange(startRow, 2).setNumberFormat('$#,##0');
-    boldRows.push('A' + startRow + ':B' + startRow);
+    allRows.push(['Subtotal', subtotal]);
+    boldRows.push('A' + (startRow + allRows.length - 1) + ':B' + (startRow + allRows.length - 1));
     grandTotal += subtotal;
-    startRow++;
-    startRow++; // blank separator
+
+    allRows.push(['', '']); // blank separator
   }
 
   addSubSection('KETO (Incluidos)', ketoRows);
   addSubSection('NO KETO (Excluidos)', noKetoRows);
   addSubSection('NO COMESTIBLE', noFoodRows);
 
-  sheet.getRange(startRow, 1, 1, 2).setValues([['TOTAL GENERAL', grandTotal]]);
-  sheet.getRange(startRow, 2).setNumberFormat('$#,##0');
-  boldRows.push('A' + startRow + ':B' + startRow);
-  startRow++;
+  allRows.push(['TOTAL GENERAL', grandTotal]);
+  boldRows.push('A' + (startRow + allRows.length - 1) + ':B' + (startRow + allRows.length - 1));
 
-  return startRow;
+  // Single batch write
+  sheet.getRange(startRow, 1, allRows.length, 2).setValues(allRows);
+  // CLP format on entire Total column in one call
+  sheet.getRange(startRow, 2, allRows.length, 1).setNumberFormat('$#,##0');
+
+  return startRow + allRows.length;
+}
+
+/**
+ * Aggregates totals by category from pre-filtered row arrays.
+ * Reusable counterpart to _aggregateByCategory (which reads from a sheet).
+ */
+function _aggregateByCategoryFromRows(rows, catIdx, totalIdx) {
+  var totals = {};
+  rows.forEach(function(row) {
+    var cat = row[catIdx] || 'Sin Categoria';
+    var amount = Number(row[totalIdx]) || 0;
+    totals[cat] = (totals[cat] || 0) + amount;
+  });
+  return totals;
 }
