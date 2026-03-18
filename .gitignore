@@ -3,3 +3,4 @@ CLAUDE.md
 .claude/CLAUDE.md
 *.env
 *.key
+.clasp.json
