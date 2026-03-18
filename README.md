@@ -61,7 +61,7 @@
 
 ## Sheet Structure
 
-The script creates and manages 7 tabs (6 visible + 1 hidden):
+The script creates and manages 7 tabs (6 visible + 1 hidden), plus monthly history snapshots:
 
 ### Gastos (main expenses)
 
@@ -126,9 +126,19 @@ Auto-generated summary with four sections:
 
 All monetary values are formatted as CLP ($#,##0). Refreshed automatically after processing or manually via **Recibos → Actualizar Resumen**.
 
+### Monthly History Tabs (e.g., "2026-03 Marzo")
+
+Auto-generated snapshot tabs created on month-end (via triggers) or manually via **Archivar Mes Actual**. Each tab contains:
+
+- Filtered **Gastos**, **Incluidos**, **Excluidos**, and **No Comestible** rows for that month
+- **Mini-Resumen** with keto/non-keto/non-food subtotals by category
+- CLP formatting and bold headers throughout
+
+Tab naming format: `YYYY-MM NombreMes` (Spanish month names). Idempotent — won't recreate if the tab already exists.
+
 ### Cache (hidden)
 
-Hidden sheet that caches all Gemini API responses to avoid redundant calls. Keyed by `fileId + lastModified` so re-uploads are detected automatically.
+Hidden sheet that caches all Gemini API responses to avoid redundant calls. Keyed by `fileId + lastModified` so re-uploads are detected automatically. Expired entries (>90 days) are automatically purged on each processing run.
 
 ### Auto-Categories
 
@@ -154,6 +164,9 @@ After processing both bank statements and receipts, the system matches them usin
 | **Procesar Recibos** | Process all new files (images, PDFs, CSVs, Excel) |
 | **Reprocesar Todo** | Clear all data and reprocess everything from scratch |
 | **Actualizar Resumen** | Refresh only the Resumen tab |
+| **Archivar Mes Actual** | Create a monthly snapshot tab with filtered data + mini-summary |
+| **Instalar Triggers Automáticos** | Set up weekly processing (Sunday 3 AM) + daily month-end archival (2 AM) |
+| **Desinstalar Triggers** | Remove all automated triggers |
 | **Limpiar Datos** | Clear all data from all tabs (keeps headers, preserves cache) |
 | **Invalidar Cache** | Clear all cached Gemini responses |
 | **Configurar API Key** | Set your Gemini API key |
@@ -172,17 +185,19 @@ After processing both bank statements and receipts, the system matches them usin
 
 1. Create a new Google Sheet
 2. Go to **Extensions → Apps Script**
-3. Delete the default `Code.gs` content, then create 8 script files and paste the contents from this repo:
+3. Delete the default `Code.gs` content, then create 10 script files and paste the contents from this repo:
 
 | File | Purpose |
 |------|---------|
-| `Config.gs` | Constants, sheet names, keto dictionary defaults, API key helpers |
+| `Config.gs` | Constants, sheet names, column index map, keto dictionary defaults, API key helpers |
 | `DriveService.gs` | Drive folder scanning, file loading, Excel conversion |
 | `GeminiService.gs` | Gemini API integration, receipt extraction, CSV column detection, bank categorization, receipt matching |
 | `SheetService.gs` | Sheet operations, keto classification, Gemini fallback, summary generation |
-| `CacheService.gs` | Gemini response caching (hidden Cache sheet) |
+| `CacheService.gs` | Gemini response caching with auto-purge of expired entries |
 | `CsvService.gs` | CSV/Excel bank statement parsing with auto column detection |
 | `ReconciliationService.gs` | Two-tier receipt-to-bank-transaction matching |
+| `TriggerService.gs` | Automated trigger management (weekly processing + month-end archival) |
+| `HistoryService.gs` | Monthly history snapshot tabs with filtered data and mini-summaries |
 | `Code.gs` | Menu, orchestrator, three-phase processing loop |
 
 4. Update `FOLDER_ID` in `Config.gs` with your Google Drive folder ID
@@ -200,10 +215,13 @@ After processing both bank statements and receipts, the system matches them usin
 
 ### 4. (Optional) Auto-Processing
 
-Set up a time-based trigger in Apps Script:
+Use the built-in trigger management from the **Recibos** menu:
 
-1. In the Apps Script editor, go to **Triggers** (clock icon)
-2. Add trigger → `processReceipts` → Time-driven → choose interval (e.g., every hour)
+1. Click **Recibos → Instalar Triggers Automáticos**
+2. This creates two triggers:
+   - **Weekly** (Sunday 3 AM) — processes all pending receipts and bank statements
+   - **Daily** (2 AM) — on the last day of each month, archives the month's data into a snapshot tab before processing
+3. To remove triggers: **Recibos → Desinstalar Triggers**
 
 ## Smart Classification
 
@@ -255,6 +273,9 @@ PDF ─────────▶ GeminiService ──▶ Gemini (extract PDF) 
                                                  Resumen
 
 All Gemini calls ──▶ cachedCallGemini() ──▶ Cache hit? return : call API + store
+
+TriggerService (weekly) ──▶ _processReceiptsCore() ──▶ full pipeline
+TriggerService (daily)  ──▶ _isLastDayOfMonth()? ──▶ archiveMonth() + _processReceiptsCore()
 ```
 
 ## Key Features
@@ -265,7 +286,9 @@ All Gemini calls ──▶ cachedCallGemini() ──▶ Cache hit? return : call
 - **Bank reconciliation** — matches receipts to bank transactions (fuzzy + AI)
 - **AI-powered classification** — dictionary for known items, Gemini fallback for unknowns
 - **Auto-learning dictionary** — Gemini results are saved for future runs
-- **Response caching** — all Gemini calls cached to minimize token usage
+- **Response caching** — all Gemini calls cached to minimize token usage, expired entries auto-purged
+- **Automated scheduling** — weekly receipt processing + month-end archival via built-in triggers
+- **Monthly snapshots** — history tabs with filtered data and mini-summaries per month
 - **Three-way item split** — keto food / non-keto food / non-food in separate tabs
 - **Summary dashboard** — four-section Resumen with subtotals and grand total
 - **CLP formatting** — all monetary values displayed as Chilean pesos ($#,##0)

@@ -10,6 +10,11 @@ function onOpen() {
     .addItem('Reprocesar Todo', 'reprocesarTodo')
     .addItem('Actualizar Resumen', 'updateResumen')
     .addSeparator()
+    .addItem('Archivar Mes Actual', 'archiveCurrentMonth')
+    .addSeparator()
+    .addItem('Instalar Triggers Automáticos', 'installTriggers')
+    .addItem('Desinstalar Triggers', 'uninstallTriggers')
+    .addSeparator()
     .addItem('Limpiar Datos', 'confirmClearAllData')
     .addItem('Invalidar Cache', 'confirmClearCache')
     .addItem('Configurar API Key', 'setupApiKey')
@@ -17,32 +22,41 @@ function onOpen() {
 }
 
 /**
- * Main orchestrator. Three-phase processing:
+ * Menu wrapper for processReceipts. Handles UI errors (Drive access, etc.)
+ * then delegates to _processReceiptsCore.
+ */
+function processReceipts() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  try {
+    _processReceiptsCore(ss);
+  } catch (e) {
+    Logger.log('processReceipts: error: %s', e.message);
+    var ui = SpreadsheetApp.getUi();
+    ui.alert('Error', 'Error durante el procesamiento:\n' + e.message, ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * Core processing logic (no UI.alert calls — safe for trigger context).
+ * Three-phase processing:
  * 1. CSVs/Excel → bank transaction rows
  * 2. Images/PDFs → receipt rows with keto classification
  * 3. Reconciliation → match receipts to bank transactions
+ *
+ * @param {Spreadsheet} ss - The active spreadsheet.
  */
-function processReceipts() {
-  const ui = SpreadsheetApp.getUi();
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-
-  // --- 1. Sheet setup ---
-  const sheets = initAllSheets();
-  const geminiUrl = getGeminiUrl();
+function _processReceiptsCore(ss) {
+  // --- 1. Sheet setup + cache purge ---
+  var sheets = initAllSheets();
+  purgeExpiredCache();
+  var geminiUrl = getGeminiUrl();
 
   // --- 2. Dedup ---
-  const processedIds = getProcessedFileIds(sheets.gastos);
-  const processedBankHashes = getProcessedBankHashes(sheets.gastos);
+  var processedIds = getProcessedFileIds(sheets.gastos);
+  var processedBankHashes = getProcessedBankHashes(sheets.gastos);
 
   // --- 3. Fetch all files ---
-  let allFiles;
-  try {
-    allFiles = getFiles(FOLDER_ID);
-  } catch (driveError) {
-    Logger.log('processReceipts: error accediendo a Drive: %s', driveError.message);
-    ui.alert('Error', 'No se pudo leer la carpeta de Drive:\n' + driveError.message, ui.ButtonSet.OK);
-    return;
-  }
+  var allFiles = getFiles(FOLDER_ID);
 
   // --- 4. Separate by strategy and filter processed ---
   var csvFiles = [];
@@ -65,14 +79,51 @@ function processReceipts() {
 
   ss.toast('Procesando ' + totalPending + ' archivo(s)...', 'Recibos', 5);
 
-  let successCount = 0;
-  let errorCount = 0;
-  const gastosRows = [];
-  const allKetoRows = [];
-  const allNoKetoRows = [];
-  const allNoFoodRows = [];
-
   // --- PHASE 1: Process CSVs/Excel ---
+  var phase1 = _processCsvFiles(csvFiles, sheets, processedBankHashes, ss);
+
+  // Flush bank rows before processing receipts
+  flushReceiptRows(sheets.gastos, phase1.gastosRows);
+
+  // --- PHASE 2: Process receipt images/PDFs ---
+  var receiptBatch = receiptFiles.slice(0, BATCH_SIZE);
+  var phase2 = _processReceiptFiles(receiptBatch, sheets, geminiUrl, ss);
+
+  // --- Final flush ---
+  flushAll(sheets, phase2.gastosRows, phase2.ketoRows, phase2.noKetoRows, phase2.noFoodRows);
+
+  // --- PHASE 3: Reconciliation ---
+  matchAndMerge(sheets.gastos);
+
+  // --- Refresh summary ---
+  refreshResumen();
+
+  // --- Summary ---
+  var successCount = phase1.successCount + phase2.successCount;
+  var errorCount = phase1.errorCount + phase2.errorCount;
+  var remaining = receiptFiles.length - receiptBatch.length;
+  var summaryLines = [
+    'Procesamiento completado.',
+    '',
+    'Exitosos:  ' + successCount,
+    'Errores:   ' + errorCount
+  ];
+  if (remaining > 0) {
+    summaryLines.push('');
+    summaryLines.push('Quedan ' + remaining + ' archivos. Ejecuta de nuevo.');
+  }
+  ss.toast(summaryLines.join('\n'), 'Recibos', 15);
+}
+
+/**
+ * Phase 1: Process CSV/Excel bank statement files.
+ * @returns {{ successCount, errorCount, gastosRows }}
+ */
+function _processCsvFiles(csvFiles, sheets, processedBankHashes, ss) {
+  var successCount = 0;
+  var errorCount = 0;
+  var gastosRows = [];
+
   csvFiles.forEach(function (file) {
     ss.toast('Procesando extracto: ' + file.name, 'Recibos', 30);
     Logger.log('processReceipts: procesando extracto "%s"', file.name);
@@ -97,12 +148,20 @@ function processReceipts() {
     Utilities.sleep(RATE_LIMIT_DELAY);
   });
 
-  // Flush bank rows before processing receipts
-  flushReceiptRows(sheets.gastos, gastosRows);
-  gastosRows.length = 0;
+  return { successCount: successCount, errorCount: errorCount, gastosRows: gastosRows };
+}
 
-  // --- PHASE 2: Process receipt images/PDFs ---
-  var receiptBatch = receiptFiles.slice(0, BATCH_SIZE);
+/**
+ * Phase 2: Process receipt image/PDF files.
+ * @returns {{ successCount, errorCount, gastosRows, ketoRows, noKetoRows, noFoodRows }}
+ */
+function _processReceiptFiles(receiptBatch, sheets, geminiUrl, ss) {
+  var successCount = 0;
+  var errorCount = 0;
+  var gastosRows = [];
+  var ketoRows = [];
+  var noKetoRows = [];
+  var noFoodRows = [];
 
   for (var i = 0; i < receiptBatch.length; i++) {
     var file = receiptBatch[i];
@@ -117,9 +176,9 @@ function processReceipts() {
       if (data) {
         gastosRows.push(buildReceiptRow(data, file.name, file.id));
         var classified = classifyItems(data, sheets);
-        classified.ketoRows.forEach(function (r) { allKetoRows.push(r); });
-        classified.noKetoRows.forEach(function (r) { allNoKetoRows.push(r); });
-        classified.noFoodRows.forEach(function (r) { allNoFoodRows.push(r); });
+        classified.ketoRows.forEach(function (r) { ketoRows.push(r); });
+        classified.noKetoRows.forEach(function (r) { noKetoRows.push(r); });
+        classified.noFoodRows.forEach(function (r) { noFoodRows.push(r); });
         successCount++;
       } else {
         Logger.log('processReceipts: extraccion fallida para "%s", se omite.', file.name);
@@ -131,7 +190,7 @@ function processReceipts() {
     }
 
     if (gastosRows.length >= FLUSH_INTERVAL) {
-      flushAll(sheets, gastosRows, allKetoRows, allNoKetoRows, allNoFoodRows);
+      flushAll(sheets, gastosRows, ketoRows, noKetoRows, noFoodRows);
       Logger.log('processReceipts: flush parcial tras %s archivos.', i + 1);
     }
 
@@ -140,28 +199,14 @@ function processReceipts() {
     }
   }
 
-  // --- Final flush ---
-  flushAll(sheets, gastosRows, allKetoRows, allNoKetoRows, allNoFoodRows);
-
-  // --- PHASE 3: Reconciliation ---
-  matchAndMerge(sheets.gastos);
-
-  // --- Refresh summary ---
-  refreshResumen();
-
-  // --- Summary ---
-  var remaining = receiptFiles.length - receiptBatch.length;
-  var summaryLines = [
-    'Procesamiento completado.',
-    '',
-    'Exitosos:  ' + successCount,
-    'Errores:   ' + errorCount
-  ];
-  if (remaining > 0) {
-    summaryLines.push('');
-    summaryLines.push('Quedan ' + remaining + ' archivos. Ejecuta de nuevo.');
-  }
-  ss.toast(summaryLines.join('\n'), 'Recibos', 15);
+  return {
+    successCount: successCount,
+    errorCount: errorCount,
+    gastosRows: gastosRows,
+    ketoRows: ketoRows,
+    noKetoRows: noKetoRows,
+    noFoodRows: noFoodRows
+  };
 }
 
 function updateResumen() {
@@ -246,6 +291,7 @@ function processSpecificFile(fileId) {
   }
 
   var fileHash = getDriveFileHash(fileId);
+  var geminiUrl = getGeminiUrl();
 
   if (strategy === 'csv' || strategy === 'excel') {
     var transactions = parseBankFile(fileId, strategy, fileHash);
@@ -253,7 +299,7 @@ function processSpecificFile(fileId) {
     flushReceiptRows(sheets.gastos, rows);
   } else {
     var base64 = getFileBase64(fileId);
-    var data = extractReceiptData(base64, mimeType, file.getName(), fileHash);
+    var data = extractReceiptData(base64, mimeType, file.getName(), fileHash, geminiUrl);
     if (data) {
       flushReceiptRows(sheets.gastos, [buildReceiptRow(data, file.getName(), fileId)]);
       var classified = classifyItems(data, sheets);

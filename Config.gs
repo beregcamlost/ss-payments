@@ -125,6 +125,26 @@ const DEFAULT_KETO_DICT = [
 ];
 
 // ---------------------------------------------------------------------------
+// Precomputed column index map (derived from HEADERS)
+// ---------------------------------------------------------------------------
+const COL = {};
+HEADERS.forEach(function(h, i) { COL[h.replace(/[\s\/]/g, '_').toUpperCase()] = i; });
+
+// ---------------------------------------------------------------------------
+// Reconciliation & cache constants
+// ---------------------------------------------------------------------------
+const RECONCILIATION_TOLERANCE = 0.1;
+const CACHE_MAX_AGE_DAYS = 90;
+
+// ---------------------------------------------------------------------------
+// Spanish month names for history tabs
+// ---------------------------------------------------------------------------
+const MONTH_NAMES_ES = [
+  'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+  'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
+];
+
+// ---------------------------------------------------------------------------
 // Processing limits
 // ---------------------------------------------------------------------------
 

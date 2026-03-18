@@ -83,6 +83,37 @@ function cachedCallGemini(hash, tipo, payload, label) {
 }
 
 /**
+ * Purges cache entries older than CACHE_MAX_AGE_DAYS.
+ * Reads all rows, keeps valid ones, clears sheet, writes back.
+ */
+function purgeExpiredCache() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CACHE_SHEET_NAME);
+  if (!sheet || sheet.getLastRow() < 2) return;
+
+  var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, CACHE_HEADERS.length).getValues();
+  var cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - CACHE_MAX_AGE_DAYS);
+
+  var validRows = data.filter(function(row) {
+    var ts = row[3];
+    return ts instanceof Date && ts >= cutoff;
+  });
+
+  var purged = data.length - validRows.length;
+  if (purged === 0) return;
+
+  // Clear and rewrite
+  if (sheet.getLastRow() > 1) {
+    sheet.deleteRows(2, sheet.getLastRow() - 1);
+  }
+  if (validRows.length > 0) {
+    sheet.getRange(2, 1, validRows.length, CACHE_HEADERS.length).setValues(validRows);
+  }
+
+  Logger.log('CacheService: %s entradas expiradas purgadas, %s conservadas.', purged, validRows.length);
+}
+
+/**
  * Clears all cached entries.
  */
 function clearCache() {

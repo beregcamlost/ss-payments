@@ -15,13 +15,13 @@ function matchAndMerge(gastosSheet) {
 
   var data = gastosSheet.getRange(2, 1, lastRow - 1, HEADERS.length).getValues();
 
-  var origenCol = HEADERS.indexOf('Origen');
-  var estadoCol = HEADERS.indexOf('Estado');
-  var fechaCol = HEADERS.indexOf('Fecha');
-  var comercioCol = HEADERS.indexOf('Comercio / Destinatario');
-  var totalCol = HEADERS.indexOf('Total');
-  var descCol = HEADERS.indexOf('Descripcion');
-  var fileIdCol = HEADERS.indexOf('File ID');
+  var origenCol = COL.ORIGEN;
+  var estadoCol = COL.ESTADO;
+  var fechaCol = COL.FECHA;
+  var comercioCol = COL.COMERCIO___DESTINATARIO;
+  var totalCol = COL.TOTAL;
+  var descCol = COL.DESCRIPCION;
+  var fileIdCol = COL.FILE_ID;
 
   var bankRows = [];
   var receiptRows = [];
@@ -79,30 +79,34 @@ function matchAndMerge(gastosSheet) {
   receiptRows.forEach(function (receipt) {
     if (matchedBankIndices.has('r' + receipt.rowIndex)) return;
 
-    var candidates = [];
-    var candidateIndices = [];
-    bankRows.forEach(function (bank, i) {
-      if (matchedBankIndices.has(i)) return;
-      if (Math.abs(receipt.total - bank.total) <= receipt.total * 0.1) {
-        candidates.push({ fecha: bank.fecha, descripcion: bank.descripcion, monto: bank.total });
-        candidateIndices.push(i);
+    try {
+      var candidates = [];
+      var candidateIndices = [];
+      bankRows.forEach(function (bank, i) {
+        if (matchedBankIndices.has(i)) return;
+        if (Math.abs(receipt.total - bank.total) <= receipt.total * RECONCILIATION_TOLERANCE) {
+          candidates.push({ fecha: bank.fecha, descripcion: bank.descripcion, monto: bank.total });
+          candidateIndices.push(i);
+        }
+      });
+
+      if (candidates.length === 0) return;
+
+      var receiptData = { comercio: receipt.comercio, fecha: receipt.fecha, total: receipt.total };
+      var hash = 'match:' + receipt.fileId;
+      var result = matchReceiptToTransaction(receiptData, candidates, hash);
+
+      if (result && result.matched && result.index >= 0 && result.index < candidateIndices.length) {
+        var bankIdx = candidateIndices[result.index];
+        updates.push({ rowIndex: receipt.rowIndex, estado: ESTADO.CONCILIADO });
+        updates.push({ rowIndex: bankRows[bankIdx].rowIndex, estado: ESTADO.CONCILIADO });
+        matchedBankIndices.add(bankIdx);
+        matchedBankIndices.add('r' + receipt.rowIndex);
+        Logger.log('ReconciliationService: match Gemini — "%s" con "%s"',
+          receipt.comercio, bankRows[bankIdx].descripcion);
       }
-    });
-
-    if (candidates.length === 0) return;
-
-    var receiptData = { comercio: receipt.comercio, fecha: receipt.fecha, total: receipt.total };
-    var hash = 'match:' + receipt.fileId;
-    var result = matchReceiptToTransaction(receiptData, candidates, hash);
-
-    if (result && result.matched && result.index >= 0 && result.index < candidateIndices.length) {
-      var bankIdx = candidateIndices[result.index];
-      updates.push({ rowIndex: receipt.rowIndex, estado: ESTADO.CONCILIADO });
-      updates.push({ rowIndex: bankRows[bankIdx].rowIndex, estado: ESTADO.CONCILIADO });
-      matchedBankIndices.add(bankIdx);
-      matchedBankIndices.add('r' + receipt.rowIndex);
-      Logger.log('ReconciliationService: match Gemini — "%s" con "%s"',
-        receipt.comercio, bankRows[bankIdx].descripcion);
+    } catch (e) {
+      Logger.log('ReconciliationService: error en Tier 2 para "%s": %s', receipt.comercio, e.message);
     }
   });
 

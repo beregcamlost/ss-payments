@@ -148,10 +148,10 @@ function getProcessedBankHashes(sheet) {
   var lastRow = sheet.getLastRow();
   if (lastRow < 2) return hashes;
 
-  var origenCol = HEADERS.indexOf('Origen');
-  var fechaCol = HEADERS.indexOf('Fecha');
-  var descCol = HEADERS.indexOf('Descripcion');
-  var totalCol = HEADERS.indexOf('Total');
+  var origenCol = COL.ORIGEN;
+  var fechaCol = COL.FECHA;
+  var descCol = COL.DESCRIPCION;
+  var totalCol = COL.TOTAL;
 
   var data = sheet.getRange(2, 1, lastRow - 1, HEADERS.length).getValues();
   data.forEach(function (row) {
